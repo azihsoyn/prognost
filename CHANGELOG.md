@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- A function whose only edit is a comment is no longer *changed*.
+- Files under a `tests/`, `test/` or `__tests__/` directory at the
+  repository's root count as tests too (only nested ones did).
+- Go and Python methods are named with their type or class
+  (`Store.Save`, `Repo.save`), so two types' methods of one name stay
+  two functions.
+
 ### Added
 
 - Go: functions, methods and function literals; calls through the
@@ -19,7 +28,8 @@ follow [Semantic Versioning](https://semver.org/).
   plan, a hollow arrowhead `▷` in the graph, a dotted curve on the web
   page.
 - Python calls on instances whose class the code states (annotations,
-  `x = Repo(…)`, `self.x = …`) reach the class's method.
+  `x = Repo(…)`, `self.x = …`, `self.save()`) reach the class's method;
+  `Repo(…)` reaches `Repo.__init__`.
 - `[[resolver]]` in `prognost.toml`: an external command (Go's
   `callgraph`, or anything printing call site → function positions) that
   answers the calls prognost cannot resolve by reading code. Run once per

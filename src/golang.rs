@@ -12,7 +12,7 @@ use tree_sitter::Node;
 
 use crate::bindings::{Binding, Import};
 use crate::rev::Rev;
-use crate::ts_extract::{TsFunction, normalized_hash};
+use crate::ts_extract::{TsFunction, code_hash};
 use crate::workspace::{PackageKind, Workspace};
 
 fn text(node: Node, src: &[u8]) -> String {
@@ -46,17 +46,31 @@ fn walk(node: Node, src: &[u8], enclosing: Option<usize>, out: &mut Vec<TsFuncti
         kind,
         "function_declaration" | "method_declaration" | "func_literal"
     ) {
-        let name = node.child_by_field_name("name").map(|n| text(n, src));
         let method = kind == "method_declaration";
+        // A method goes by its type: `Store.Save`, so two types' `Save`
+        // are two functions.
+        let name = node.child_by_field_name("name").map(|n| {
+            let recv = node
+                .child_by_field_name("receiver")
+                .and_then(|r| r.named_child(0))
+                .and_then(|p| p.child_by_field_name("type"))
+                .and_then(|t| receiver_type(t, src));
+            match recv {
+                Some(r) if method => format!("{r}.{}", text(n, src)),
+                _ => text(n, src),
+            }
+        });
         let id = out.len();
         out.push(TsFunction {
             parent: enclosing,
-            exported: name.as_deref().is_some_and(exported),
+            exported: name
+                .as_deref()
+                .is_some_and(|n| exported(n.rsplit('.').next().unwrap_or(n))),
             name,
             method,
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
-            body_hash: normalized_hash(&src[node.byte_range()]),
+            body_hash: code_hash(node, src),
             calls: Vec::new(),
             call_lines: Vec::new(),
             route: if kind == "func_literal" {
@@ -401,7 +415,7 @@ func helper() error { return nil }
                 (Some("Open"), true, false, None),
                 (None, false, false, Some(0)),
                 (None, false, false, Some(0)),
-                (Some("Close"), true, true, None),
+                (Some("Store.Close"), true, true, None),
                 (Some("helper"), false, false, None),
             ]
         );

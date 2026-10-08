@@ -165,15 +165,15 @@ func (p *Pool) exec(q string) error { return nil }
     );
     assert_eq!(
         names(&report, Change::Changed),
-        vec!["internal/db/pool.go:Query"]
+        vec!["internal/db/pool.go:Pool.Query"]
     );
     assert_eq!(
         names(&report, Change::Added),
-        vec!["internal/db/pool.go:release"]
+        vec!["internal/db/pool.go:Pool.release"]
     );
     let upstream = names(&report, Change::Unchanged);
     for f in [
-        "internal/orders/service.go:Charge",
+        "internal/orders/service.go:Service.Charge",
         "internal/orders/handler.go:Routes",
         "cmd/api/main.go:main",
     ] {
@@ -189,7 +189,7 @@ func (p *Pool) exec(q string) error { return nil }
         .summary
         .symbols
         .iter()
-        .find(|s| s.id.ends_with("Query"))
+        .find(|s| s.id.ends_with("Pool.Query"))
         .unwrap();
     assert!(query.public, "exported and called from another package");
     assert!(rules_found(dir.path(), &report).contains(&"defer-in-loop".to_string()));
@@ -303,9 +303,9 @@ fn go_calls_through_an_interface_reach_its_implementations_as_inferred() {
     let call = report
         .calls
         .iter()
-        .find(|c| c.callee == "postgres/store.go::Save")
+        .find(|c| c.callee == "postgres/store.go::PgStore.Save")
         .expect("a call into the changed method");
-    assert_eq!(call.caller, "orders/service.go::Checkout");
+    assert_eq!(call.caller, "orders/service.go::Service.Checkout");
     assert!(call.inferred);
     assert_eq!(call.line, Some(10));
 }
@@ -356,7 +356,7 @@ def save(x):
     let upstream = names(&report, Change::Unchanged);
     assert_eq!(
         upstream,
-        vec!["app/service.py:nightly", "app/service.py:run"],
+        vec!["app/service.py:Checkout.run", "app/service.py:nightly"],
         "a bare save() elsewhere is another function"
     );
     assert!(report.calls.iter().all(|c| !c.inferred));
@@ -406,5 +406,41 @@ fn an_external_resolver_answers_what_prognost_cannot_see() {
             Some(5),
             false
         )
+    );
+}
+
+#[test]
+fn python_constructors_reach_init_and_only_their_own() {
+    let base: &[(&str, &str)] = &[
+        ("pyproject.toml", "[project]\nname = \"app\"\n"),
+        ("app/__init__.py", "from .models import Order, Invoice\n"),
+        (
+            "app/models.py",
+            "class Order:\n    def __init__(self, id):\n        self.id = id\n\n\nclass Invoice:\n    def __init__(self, id):\n        self.id = id\n",
+        ),
+        (
+            "app/shop.py",
+            "from app import Invoice, Order\n\n\ndef place(id):\n    return Order(id)\n\n\ndef bill(id):\n    return Invoice(id)\n\n\ndefault = Order(0)\n",
+        ),
+        // A test at the repository's root is not a caller.
+        (
+            "tests/test_shop.py",
+            "from app import Order\n\n\ndef test_place():\n    Order(1)\n",
+        ),
+    ];
+    let (_dir, report) = plan(
+        base,
+        &[(
+            "app/models.py",
+            "class Order:\n    def __init__(self, id):\n        self.id = int(id)\n\n\nclass Invoice:\n    def __init__(self, id):\n        self.id = id\n",
+        )],
+    );
+    assert_eq!(
+        names(&report, Change::Changed),
+        vec!["app/models.py:Order.__init__"]
+    );
+    assert_eq!(
+        names(&report, Change::Unchanged),
+        vec!["app/shop.py:place", "app/shop.py:shop.py · module level"]
     );
 }

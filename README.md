@@ -190,6 +190,7 @@ listed below.
 | | Go: calls through an interface | ◐ every type in the repository with the interface's methods (by name), up to 8, marked `inferred` |
 | | Python: absolute and relative imports, `__init__.py` re-exports, `src/` layouts | ✅ |
 | | Python: methods on instances (`repo.save()`) | ◐ when the code states the class: a parameter's annotation, `x = Repo(…)`, `self.x = …` or `self.x: Repo` in the class; otherwise only a method of that name in the calling file |
+| | Python: constructors (`Repo(…)` → `Repo.__init__`) | ✅ in functions and at a module's top level |
 | **Workspaces** | pnpm (`pnpm-workspace.yaml`), npm and yarn (`package.json` `workspaces`) | ✅ |
 | | Go modules (`go.mod`, several per repository) | ✅ each package is its directory |
 | | Python projects (`pyproject.toml`, `setup.py`) | ✅ |

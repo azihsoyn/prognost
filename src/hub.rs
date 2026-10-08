@@ -157,11 +157,14 @@ fn callers_of(
 
     // A declared function is called by its bare name; a method — a
     // property of some object — as `<anything>.name(…)`, and the
-    // receiver is whatever holds it, so the suffix is the only handle.
+    // receiver is whatever holds it, so the suffix is the only handle
+    // (a Go or Python method's label carries its type, `Store.save`:
+    // the suffix is the name after it).
     let calls_target = |f: &TsFunction, target: &str, method: bool| {
+        let name = target.rsplit('.').next().unwrap_or(target);
         f.calls
             .iter()
-            .any(|c| c == target || (method && c.ends_with(&format!(".{target}"))))
+            .any(|c| c == target || (method && c.ends_with(&format!(".{name}"))))
     };
     // The named or routed functions whose body — callbacks folded in —
     // calls `focus`, in source order, the focus itself excluded.

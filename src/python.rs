@@ -14,7 +14,7 @@ use tree_sitter::Node;
 
 use crate::bindings::{Binding, Import};
 use crate::rev::Rev;
-use crate::ts_extract::{TsFunction, normalized_hash};
+use crate::ts_extract::{TsFunction, code_hash};
 use crate::workspace::{PackageKind, Workspace};
 
 fn text(node: Node, src: &[u8]) -> String {
@@ -44,7 +44,7 @@ pub fn extract(source: &str) -> anyhow::Result<Vec<TsFunction>> {
         out: Vec::new(),
         envs: Vec::new(),
     };
-    w.walk(tree.root_node(), None, false, None);
+    w.walk(tree.root_node(), None, None);
     Ok(w.out)
 }
 
@@ -59,18 +59,25 @@ struct Walker<'a> {
 }
 
 impl Walker<'_> {
-    fn walk(&mut self, node: Node, enclosing: Option<usize>, in_class: bool, class: Option<&Env>) {
+    /// `class`: the class whose body `node` is directly in — its name
+    /// and what its attributes hold.
+    fn walk(&mut self, node: Node, enclosing: Option<usize>, class: Option<(&str, &Env)>) {
+        let in_class = class.is_some();
         let src = self.src;
         match node.kind() {
             // `lambda` is also the keyword's own (unnamed) node.
             "function_definition" | "lambda" if node.is_named() => {
                 let lambda = node.kind() == "lambda";
+                let method = in_class && !lambda;
+                // A method goes by its class: `Repo.save`.
                 let name = if lambda {
                     lambda_name(node, src)
                 } else {
-                    node.child_by_field_name("name").map(|n| text(n, src))
+                    node.child_by_field_name("name").map(|n| match class {
+                        Some((c, _)) => format!("{c}.{}", text(n, src)),
+                        None => text(n, src),
+                    })
                 };
-                let method = in_class && !lambda;
                 let id = self.out.len();
                 // A decorated function starts at its first decorator.
                 let span = node
@@ -86,34 +93,38 @@ impl Walker<'_> {
                     method,
                     start_line: span.start_position().row as u32 + 1,
                     end_line: span.end_position().row as u32 + 1,
-                    body_hash: normalized_hash(&src[node.byte_range()]),
+                    body_hash: code_hash(node, src),
                     calls: Vec::new(),
                     call_lines: Vec::new(),
                     route: if lambda { None } else { route_info(node, src) },
                 });
                 // A closure sees what its function knew.
                 let mut env = enclosing.map(|e| self.envs[e].clone()).unwrap_or_default();
-                if method && let Some(class) = class {
+                if method && let Some((name, class)) = class {
                     env.extend(class.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    env.insert("self".into(), name.into());
+                    env.insert("cls".into(), name.into());
                 }
                 env.extend(function_env(node, src));
                 self.envs.push(env);
                 for child in node.children(&mut node.walk()) {
-                    self.walk(child, Some(id), false, None);
+                    self.walk(child, Some(id), None);
                 }
                 return;
             }
             "class_definition" => {
                 let env = class_env(node, src);
+                let name = node
+                    .child_by_field_name("name")
+                    .map(|n| text(n, src))
+                    .unwrap_or_default();
                 if let Some(body) = node.child_by_field_name("body") {
                     for child in body.children(&mut body.walk()) {
-                        self.walk(child, enclosing, true, Some(&env));
+                        self.walk(child, enclosing, Some((&name, &env)));
                     }
                 }
-                for field in ["superclasses", "name"] {
-                    if let Some(c) = node.child_by_field_name(field) {
-                        self.walk(c, enclosing, false, None);
-                    }
+                if let Some(c) = node.child_by_field_name("superclasses") {
+                    self.walk(c, enclosing, None);
                 }
                 return;
             }
@@ -122,12 +133,7 @@ impl Walker<'_> {
                 // inside it.
                 for child in node.children(&mut node.walk()) {
                     let decorator = child.kind() == "decorator";
-                    self.walk(
-                        child,
-                        enclosing,
-                        in_class && !decorator,
-                        class.filter(|_| !decorator),
-                    );
+                    self.walk(child, enclosing, class.filter(|_| !decorator));
                 }
                 return;
             }
@@ -147,8 +153,7 @@ impl Walker<'_> {
             _ => {}
         }
         for child in node.children(&mut node.walk()) {
-            let in_class = in_class && node.kind() == "block";
-            self.walk(child, enclosing, in_class, class.filter(|_| in_class));
+            self.walk(child, enclosing, class.filter(|_| node.kind() == "block"));
         }
     }
 }
@@ -177,7 +182,14 @@ fn typed_call(call: &str, env: &Env) -> String {
     {
         return format!("{class}.{rest}");
     }
-    if first == "self" {
+    // `self.validate(…)` in a method: the class's own.
+    if (first == "self" || first == "cls")
+        && rest.is_none()
+        && let Some(class) = env.get(first)
+    {
+        return format!("{class}.{second}");
+    }
+    if first == "self" || first == "cls" {
         return call.to_string();
     }
     match env.get(first) {
@@ -642,8 +654,8 @@ def _helper(x):
             vec![
                 (Some("list_orders"), true, false, None),
                 (Some("on_done"), false, false, Some(0)),
-                (Some("save"), false, true, None),
-                (Some("_key"), false, true, None),
+                (Some("Repo.save"), false, true, None),
+                (Some("Repo._key"), false, true, None),
                 (Some("_helper"), false, false, None),
             ]
         );
@@ -656,7 +668,7 @@ def _helper(x):
         assert_eq!(fns[1].calls, vec!["notify"]);
         assert_eq!(
             fns[2].calls,
-            vec!["self.validate", "cache(...).set", "cache"]
+            vec!["Repo.validate", "cache(...).set", "cache"]
         );
     }
 

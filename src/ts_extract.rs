@@ -231,7 +231,7 @@ fn walk(node: Node, src: &[u8], enclosing: Option<usize>, out: &mut Vec<TsFuncti
             method,
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
-            body_hash: normalized_hash(&src[node.byte_range()]),
+            body_hash: code_hash(node, src),
             calls: Vec::new(),
             call_lines: Vec::new(),
             route: route_info(node, src),
@@ -379,6 +379,31 @@ fn text(node: Node, src: &[u8]) -> String {
 /// or a shifted line number does not break a match. Hand-rolled rather
 /// than `DefaultHasher` so the fingerprint is fixed forever, independent
 /// of the standard library's own hasher.
+/// [`normalized_hash`] of a function's source with its comments left
+/// out too: a function whose only edit is a comment hasn't changed.
+pub(crate) fn code_hash(node: Node, src: &[u8]) -> u64 {
+    let mut comments: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "comment" {
+            comments.push(n.byte_range());
+            continue;
+        }
+        for i in 0..n.child_count() {
+            stack.extend(n.child(i));
+        }
+    }
+    comments.sort_by_key(|r| r.start);
+    let mut code = Vec::with_capacity(node.byte_range().len());
+    let mut at = node.start_byte();
+    for c in comments {
+        code.extend_from_slice(&src[at..c.start.max(at)]);
+        at = at.max(c.end);
+    }
+    code.extend_from_slice(&src[at..node.end_byte()]);
+    normalized_hash(&code)
+}
+
 pub(crate) fn normalized_hash(bytes: &[u8]) -> u64 {
     const OFFSET: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
@@ -475,5 +500,18 @@ export const outer = async () => {
         let a = extract("const f = () => { g(1); };", false).unwrap();
         let b = extract("const h = () => {\n  g(1);\n};", false).unwrap();
         assert_eq!(a[0].body_hash, b[0].body_hash);
+    }
+
+    #[test]
+    fn a_comment_is_not_a_change() {
+        let a = extract(
+            "function f() {\n  // old note\n  return g(1); /* x */\n}\n",
+            false,
+        )
+        .unwrap();
+        let b = extract("function f() {\n  return g(1);\n}\n", false).unwrap();
+        let c = extract("function f() {\n  return g(2);\n}\n", false).unwrap();
+        assert_eq!(a[0].body_hash, b[0].body_hash);
+        assert_ne!(b[0].body_hash, c[0].body_hash);
     }
 }

@@ -1095,8 +1095,14 @@ impl App {
                 true => id == make_fn_id(target, label),
                 false => match self.call_file.get(&id) {
                     Some((f, _)) => f == target,
+                    // Traced only as far as the target's package: in
+                    // TypeScript that is its barrel, which is how
+                    // exports are reached. A Python or Go package is
+                    // too wide for that to say anything.
                     None => {
-                        split_pkg_id(&id).is_some_and(|(pkg, _)| pkg == self.file_label(target))
+                        Lang::of(importer) == Some(Lang::TypeScript)
+                            && split_pkg_id(&id)
+                                .is_some_and(|(pkg, _)| pkg == self.file_label(target))
                     }
                 },
             })
@@ -1136,7 +1142,17 @@ impl App {
                 .iter()
                 .chain(&entry.base_fns)
                 .flat_map(|f| f.calls.iter())
-                .filter(|c| *c != label && call_matches(c, label))
+                .filter(|c| {
+                    (method || *c != label)
+                        && (call_matches(c, short_name(label))
+                            // `Repo(…)` may construct the class whose
+                            // `__init__` this is.
+                            || (label.ends_with(".__init__")
+                                && Lang::of(&importer_path) == Some(Lang::Python)
+                                && c.rsplit('.').next().is_some_and(|l| {
+                                    l.chars().next().is_some_and(char::is_uppercase)
+                                })))
+                })
                 .cloned()
                 .collect();
             dotted.sort();
@@ -1216,11 +1232,20 @@ impl App {
             // Calls at the top level of the importer — `const pool =
             // createPool(…)` when the module loads — sit in no function:
             // they reach the change as that module's own code.
-            let call = regex::Regex::new(&format!(r"\b{}\s*\(", regex::escape(label)))
-                .expect("valid regex");
+            // `app = FastAPI()` at a module's top level runs the
+            // class's `__init__`.
+            let class = label
+                .strip_suffix(".__init__")
+                .map(|c| c.rsplit('.').next().unwrap_or(c));
+            let call = regex::Regex::new(&format!(
+                r"\b{}\s*\(",
+                regex::escape(class.unwrap_or(label))
+            ))
+            .expect("valid regex");
             // Go runs no code at a file's top level worth the name (and
             // an interface's method list would read as calls).
-            let module_level = Lang::of(&importer_path) != Some(Lang::Go) && !method;
+            let module_level =
+                Lang::of(&importer_path) != Some(Lang::Go) && (!method || class.is_some());
             for (rev, fns, raw) in [
                 (&self.head_rev, &entry.head_fns, &mut module_head),
                 (&self.base_rev, &entry.base_fns, &mut module_base),
@@ -1700,6 +1725,13 @@ impl App {
         if Lang::of(&file) == Some(Lang::Go) {
             return self.resolve_go(&file, &label, &segments, status);
         }
+        // `Repo(db)`: Python runs the class's `__init__`.
+        if Lang::of(&file) == Some(Lang::Python)
+            && head.len() == label.len()
+            && let Some((f, init)) = self.python_constructor(&file, &segments)
+        {
+            return Some((make_fn_id(&f, &init), init, status, true));
+        }
         // `target.findChangedByValidStarts(…)` where `target` is a local
         // (a parameter, a strategy object) and the file itself defines
         // a method of that name: that method is the callee — all of
@@ -1707,15 +1739,17 @@ impl App {
         // whichever one was handed in.
         if segments.len() >= 2
             && let Some(last) = segments.last()
-            && self.function_files.get(&file).is_some_and(|entry| {
-                entry
-                    .head_fns
-                    .iter()
-                    .chain(&entry.base_fns)
-                    .any(|f| f.method && align::label(f) == *last)
+            && let Some(found) = self.function_files.get(&file).and_then(|entry| {
+                let all = || entry.head_fns.iter().chain(&entry.base_fns);
+                // `Repo.save` (a Python call whose class is known) names
+                // the method exactly.
+                all()
+                    .find(|f| f.method && align::label(f) == head)
+                    .or_else(|| all().find(|f| f.method && short_name(&align::label(f)) == *last))
+                    .map(align::label)
             })
         {
-            return Some((make_fn_id(&file, last), last.to_string(), status, true));
+            return Some((make_fn_id(&file, &found), found, status, true));
         }
         let import = self.bindings_of(&file).get(root)?.clone();
 
@@ -1763,9 +1797,9 @@ impl App {
                     .iter()
                     .fold(import.specifier.clone(), |m, p| crate::python::join(&m, p));
                 if let Some(f) = self.resolve_spec(&module, &file)
-                    && let Some(d) = self.python_method(&f, class, last)
+                    && let Some((d, method)) = self.python_method(&f, class, last)
                 {
-                    return Some((make_fn_id(&d, last), last.to_string(), status, true));
+                    return Some((make_fn_id(&d, &method), method, status, true));
                 }
             }
         }
@@ -1874,10 +1908,10 @@ impl App {
         let last = last.to_string();
         self.go_interface_targets(&file, &last)
             .into_iter()
-            .map(|f| {
-                let target = make_fn_id(&f, &last);
+            .map(|(f, method)| {
+                let target = make_fn_id(&f, &method);
                 self.inferred_calls.insert((file.clone(), target.clone()));
-                (target, last.clone(), status, true)
+                (target, method, status, true)
             })
             .collect()
     }
@@ -1991,8 +2025,8 @@ impl App {
             .rsplit('.')
             .next()
             .unwrap_or(label);
-        if out.len() > 1 && out.iter().any(|(_, n)| n == called) {
-            out.retain(|(_, n)| n == called);
+        if out.len() > 1 && out.iter().any(|(_, n)| short_name(n) == called) {
+            out.retain(|(_, n)| short_name(n) == called);
         }
         out
     }
@@ -2036,7 +2070,11 @@ impl App {
     /// may reach through an interface declared in its own package or
     /// one it imports. None when more than [`MAX_IMPLEMENTATIONS`]
     /// types qualify: a method that common says nothing.
-    fn go_interface_targets(&mut self, file: &std::path::Path, method: &str) -> Vec<PathBuf> {
+    fn go_interface_targets(
+        &mut self,
+        file: &std::path::Path,
+        method: &str,
+    ) -> Vec<(PathBuf, String)> {
         let mut visible: Vec<PathBuf> = vec![
             file.parent()
                 .unwrap_or(std::path::Path::new(""))
@@ -2055,14 +2093,14 @@ impl App {
             }
         }
         let index = self.go_index();
-        let mut out: Vec<PathBuf> = Vec::new();
+        let mut out: Vec<(PathBuf, String)> = Vec::new();
         for ((dir, _), methods) in &index.interfaces {
             if !visible.contains(dir) || !methods.iter().any(|m| m == method) {
                 continue;
             }
-            for set in index.methods.values() {
+            for ((_, ty), set) in &index.methods {
                 if methods.iter().all(|m| set.contains_key(m)) {
-                    out.push(set[method].clone());
+                    out.push((set[method].clone(), format!("{ty}.{method}")));
                 }
             }
         }
@@ -2120,8 +2158,8 @@ impl App {
             if !plain {
                 return None;
             }
-            if let Some(f) = self.go_package_function(&own_dir, last, method) {
-                return Some((make_fn_id(&f, last), last.to_string(), status, true));
+            if let Some((f, name)) = self.go_package_function(&own_dir, last, method) {
+                return Some((make_fn_id(&f, &name), name, status, true));
             }
             if !method {
                 return None;
@@ -2142,13 +2180,13 @@ impl App {
                 let dir = crate::golang::resolve(&spec, &self.head_ws)
                     .or_else(|| crate::golang::resolve(&spec, &self.base_ws));
                 if let Some(dir) = dir
-                    && let Some(f) = self.go_package_function(&dir, last, true)
+                    && let Some(hit) = self.go_package_function(&dir, last, true)
                 {
-                    hits.push(f);
+                    hits.push(hit);
                 }
             }
             return match hits.as_slice() {
-                [f] => Some((make_fn_id(f, last), last.to_string(), status, true)),
+                [(f, name)] => Some((make_fn_id(f, name), name.clone(), status, true)),
                 _ => None,
             };
         };
@@ -2157,9 +2195,9 @@ impl App {
         if let Some(dir) = &dir
             && plain
             && segments.len() == 2
-            && let Some(f) = self.go_package_function(dir, last, false)
+            && let Some((f, name)) = self.go_package_function(dir, last, false)
         {
-            return Some((make_fn_id(&f, last), last.to_string(), status, true));
+            return Some((make_fn_id(&f, &name), name, status, true));
         }
         let rest = label
             .strip_prefix(segments[0])
@@ -2174,30 +2212,36 @@ impl App {
     }
 
     /// The file of the Go package in `dir` (either revision) that
-    /// defines a top-level function — or, with `method`, a method —
-    /// named `name`.
+    /// defines a top-level function — or, with `method`, a method of
+    /// any type — named `name`, and its label (`Store.Save`).
     fn go_package_function(
         &mut self,
         dir: &std::path::Path,
         name: &str,
         method: bool,
-    ) -> Option<PathBuf> {
+    ) -> Option<(PathBuf, String)> {
         let mut files: Vec<PathBuf> = [&self.head_rev, &self.base_rev]
             .into_iter()
             .flat_map(|rev| crate::golang::package_files(dir, &self.root, rev))
             .collect();
         files.sort();
         files.dedup();
-        files.into_iter().find(|f| {
-            self.exports_textually(f, name)
-                && self.ensure_function_file(f)
-                && self.function_files[f]
-                    .head_fns
-                    .iter()
-                    .chain(&self.function_files[f].base_fns)
-                    .any(|g| {
-                        g.parent.is_none() && g.method == method && g.name.as_deref() == Some(name)
-                    })
+        files.into_iter().find_map(|f| {
+            if !self.exports_textually(&f, name) || !self.ensure_function_file(&f) {
+                return None;
+            }
+            let entry = &self.function_files[&f];
+            let label = entry
+                .head_fns
+                .iter()
+                .chain(&entry.base_fns)
+                .filter(|g| g.parent.is_none() && g.method == method)
+                .filter_map(|g| g.name.clone())
+                .find(|n| match method {
+                    true => short_name(n) == name,
+                    false => n == name,
+                })?;
+            Some((f, label))
         })
     }
 
@@ -2505,13 +2549,14 @@ impl App {
 
     /// The file defining Python class `class` — `file` itself, or one it
     /// imports (a package's `__init__.py` re-exporting it) — when that
-    /// class has a method `method`.
+    /// class has a method `method`; with the method's label
+    /// (`Repo.save`).
     fn python_method(
         &mut self,
         file: &std::path::Path,
         class: &str,
         method: &str,
-    ) -> Option<PathBuf> {
+    ) -> Option<(PathBuf, String)> {
         let pattern =
             regex::Regex::new(&format!(r"(?m)^class\s+{}\b", regex::escape(class))).ok()?;
         let defines = |this: &Self, f: &std::path::Path| {
@@ -2525,13 +2570,46 @@ impl App {
             candidates = self.deps_of(file);
         }
         let found = candidates.into_iter().find(|f| defines(self, f))?;
+        let label = format!("{class}.{method}");
         let has = self.ensure_function_file(&found)
             && self.function_files[&found]
                 .head_fns
                 .iter()
                 .chain(&self.function_files[&found].base_fns)
-                .any(|f| f.method && f.name.as_deref() == Some(method));
-        has.then_some(found)
+                .any(|f| f.method && f.name.as_deref() == Some(label.as_str()));
+        has.then_some((found, label))
+    }
+
+    /// The file whose class `segments` names (`Repo`, `models.Repo`),
+    /// defined in `file` or imported into it, when that class has an
+    /// `__init__`.
+    fn python_constructor(
+        &mut self,
+        file: &std::path::Path,
+        segments: &[&str],
+    ) -> Option<(PathBuf, String)> {
+        let class = *segments.last()?;
+        if !class.chars().next().is_some_and(char::is_uppercase) {
+            return None;
+        }
+        if segments.len() == 1
+            && let Some(hit) = self.python_method(file, class, "__init__")
+            && hit.0 == file
+        {
+            return Some(hit);
+        }
+        let import = self.bindings_of(file).get(segments[0])?.clone();
+        let mut parts: Vec<&str> = match &import.binding {
+            crate::bindings::Binding::Named(n) => vec![n.as_str()],
+            _ => Vec::new(),
+        };
+        parts.extend(&segments[1..]);
+        let (class, path) = parts.split_last()?;
+        let module = path
+            .iter()
+            .fold(import.specifier.clone(), |m, p| crate::python::join(&m, p));
+        let f = self.resolve_spec(&module, file)?;
+        self.python_method(&f, class, "__init__")
     }
 
     /// The files `file` imports, in either revision; tests excluded.
@@ -5811,6 +5889,11 @@ impl App {
         if name.starts_with("anon@") || name.starts_with("module@") || name.is_empty() {
             return None;
         }
+        // `Repo(…)` calls `Repo.__init__`.
+        let name = name
+            .strip_suffix(".__init__")
+            .map(str::to_string)
+            .unwrap_or(name);
         let last = name.rsplit('.').next().unwrap_or(&name).to_string();
         if let Some((_, l)) = inlined_calls(&entry.head_fns, idx)
             .into_iter()
@@ -6582,12 +6665,16 @@ const MAX_IMPLEMENTATIONS: usize = 8;
 /// asserted there, but it doesn't flow through them.
 fn is_test_file(p: &std::path::Path) -> bool {
     let s = p.to_string_lossy();
-    s.contains(".spec.")
-        || s.contains(".test.")
-        || s.contains("/tests/")
-        || s.contains("/test/")
-        || s.contains("/__tests__/")
-        || crate::lang::is_test_name(p)
+    let in_test_dir = p.parent().is_some_and(|d| {
+        d.components()
+            .any(|c| matches!(c.as_os_str().to_str(), Some("tests" | "test" | "__tests__")))
+    });
+    s.contains(".spec.") || s.contains(".test.") || in_test_dir || crate::lang::is_test_name(p)
+}
+
+/// A method's own name without its type or class: `Store.Save` → `Save`.
+fn short_name(label: &str) -> &str {
+    label.rsplit('.').next().unwrap_or(label)
 }
 
 fn basename(path: &str) -> &str {
