@@ -953,6 +953,8 @@ impl App {
             t.elapsed()
         ));
 
+        let mut module_head: Vec<(PathBuf, u32)> = Vec::new();
+        let mut module_base: Vec<(PathBuf, u32)> = Vec::new();
         let mut out: Vec<Fragment> = Vec::new();
         for p in &importer_paths {
             let importer_path = PathBuf::from(p);
@@ -1008,7 +1010,28 @@ impl App {
                 }
                 out.push((make_fn_id(&importer_path, &caller_label), caller_label, Status::Removed, true));
             }
+            // Calls at the top level of the importer — `const pool =
+            // createPool(…)` when the module loads — sit in no function:
+            // they reach the change as that module's own code.
+            let call = regex::Regex::new(&format!(r"\b{}\s*\(", regex::escape(label))).expect("valid regex");
+            for (rev, fns, raw) in [
+                (&self.head_rev, &entry.head_fns, &mut module_head),
+                (&self.base_rev, &entry.base_fns, &mut module_base),
+            ] {
+                let Some(text) = rev.read(&self.root, &importer_path) else { continue };
+                for (i, l) in text.lines().enumerate() {
+                    let line = i as u32 + 1;
+                    let code = l.trim_start();
+                    if code.starts_with("//") || code.starts_with("import ") || code.starts_with('*') {
+                        continue;
+                    }
+                    if call.is_match(l) && innermost_at(fns, line).is_none() {
+                        raw.push((importer_path.clone(), line));
+                    }
+                }
+            }
         }
+        out.extend(self.callers_from_hits(module_head, module_base));
 
         // `export * as alias from './This.ts'` in an importer: the export
         // is then used as `alias.label` wherever *that* module is
@@ -1945,8 +1968,32 @@ impl App {
         let Some(at) = ordered.iter().position(|(id, _)| *id == self.selected) else {
             return;
         };
-        let next = (at as i32 + delta).clamp(0, ordered.len() as i32 - 1) as usize;
-        self.selected = ordered[next].0.clone();
+        let next = at as i32 + delta;
+        if (0..ordered.len() as i32).contains(&next) {
+            self.selected = ordered[next as usize].0.clone();
+            return;
+        }
+        // Past the end of this box's column: the nearest node above or
+        // below on screen, in whichever box — boxes stack in a canvas,
+        // and ↑/↓ shouldn't stop at a border.
+        let Some(&(x, y, w, _)) = geo.rects.get(&self.selected) else {
+            return;
+        };
+        let centre = x + w / 2;
+        let best = geo
+            .rects
+            .iter()
+            .filter(|(id, _)| **id != self.selected)
+            .filter(|(_, (_, oy, _, _))| if delta > 0 { *oy > y } else { *oy < y })
+            .min_by_key(|(id, (ox, oy, ow, _))| {
+                let dy = (oy - y).abs();
+                let dx = (ox + ow / 2 - centre).abs();
+                (dy * 4 + dx, (*id).clone())
+            })
+            .map(|(id, _)| id.clone());
+        if let Some(id) = best {
+            self.selected = id;
+        }
     }
 
     /// Left/right follows an edge: to a caller of the selected node, or

@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/azihsoyn/prognost"
 keywords = ["ratatui", "tui", "code-review", "call-graph", "diff"]
 categories = ["command-line-interface"]
+# The README's images and the demo stay in the repository, not the crate.
+exclude = ["docs/demo/*.gif", "docs/demo/*.png", "assets/"]
 
 [dependencies]
 anyhow = "1.0.104"
