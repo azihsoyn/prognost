@@ -70,7 +70,7 @@ impl Rev {
 
     /// Where this revision's files sit on disk: the checkout itself, or
     /// the commit's extracted tree.
-    fn dir(&self, root: &Path) -> Option<PathBuf> {
+    pub fn dir(&self, root: &Path) -> Option<PathBuf> {
         match self {
             Rev::Working(_) => Some(root.to_path_buf()),
             Rev::Commit(c) => self.tree(c, root),

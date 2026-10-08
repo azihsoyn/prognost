@@ -361,3 +361,50 @@ def save(x):
     );
     assert!(report.calls.iter().all(|c| !c.inferred));
 }
+
+#[test]
+fn an_external_resolver_answers_what_prognost_cannot_see() {
+    // A function handed in as a value: only something that tracks values
+    // knows `f(id)` in Each calls Purge. The stand-in resolver prints a
+    // call list kept in the repository.
+    let base: &[(&str, &str)] = &[
+        ("go.mod", "module example.com/shop\n\ngo 1.22\n"),
+        (
+            "orders/each.go",
+            "package orders\n\nfunc Each(ids []string, f func(string) error) {\n\tfor _, id := range ids {\n\t\t_ = f(id)\n\t}\n}\n",
+        ),
+        (
+            "postgres/purge.go",
+            "package postgres\n\nfunc Purge(id string) error { return nil }\n",
+        ),
+        ("calls.txt", "orders/each.go:5 postgres/purge.go:3:6\n"),
+        (
+            "prognost.toml",
+            "[[resolver]]\nlanguage = \"go\"\ncommand = [\"cat\", \"calls.txt\"]\n",
+        ),
+    ];
+    let change: &[(&str, &str)] = &[(
+        "postgres/purge.go",
+        "package postgres\n\nfunc Purge(id string) error {\n\tif id == \"\" {\n\t\treturn nil\n\t}\n\treturn nil\n}\n",
+    )];
+    let (_dir, report) = plan(base, change);
+    assert_eq!(
+        names(&report, Change::Unchanged),
+        vec!["orders/each.go:Each"]
+    );
+    let call = &report.calls[0];
+    assert_eq!(
+        (
+            call.caller.as_str(),
+            call.callee.as_str(),
+            call.line,
+            call.inferred
+        ),
+        (
+            "orders/each.go::Each",
+            "postgres/purge.go::Purge",
+            Some(5),
+            false
+        )
+    );
+}

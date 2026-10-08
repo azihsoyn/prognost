@@ -2,7 +2,7 @@
 
 prognost works without configuration. A repository can add a
 `prognost.toml` at its root — or any file, named by `PROGNOST_CONFIG`, for a
-repository that shouldn't carry one — with three kinds of tables.
+repository that shouldn't carry one — with these kinds of tables.
 
 ## Seams: calls joined by a string
 
@@ -26,6 +26,50 @@ other. TOML's `'''…'''` strings take the regex as written.
 
 Hono's typed RPC client (`client.api.v1.orders.$post(…)` → `.post('/', …)`
 under `.route('/api/v1/orders', …)`) is built in.
+
+## Resolvers: calls an external tool resolves
+
+prognost resolves calls by reading code, not by type-checking it: a function
+handed around as a value, an interface whose implementation is chosen at run
+time, a method on an untyped value can hide an edge. A tool that does
+type-check — for Go, [`callgraph`](https://pkg.go.dev/golang.org/x/tools/cmd/callgraph)
+— can fill those in. A resolver is a command that prints the calls of one
+revision:
+
+```toml
+[[resolver]]
+language = "go"
+command = ["callgraph", "-algo=vta", "-format={{.Filename}}:{{.Line}} {{.Callee.Prog.Fset.Position .Callee.Pos}}", "./..."]
+```
+
+- `language`: `go`, `python` or `typescript` — the calls made in files of
+  that language are asked of it.
+- `command`: the program and its arguments (no shell; for one, write
+  `["sh", "-c", "…"]`).
+
+It runs once per revision, in that revision's directory: the working tree,
+or the commit extracted to the cache (see [Caches](#caches); that tree has
+no `node_modules` or virtualenv — a tool needing one can find the working
+tree in `PROGNOST_ROOT`). It is given
+
+| variable | value |
+|---|---|
+| `PROGNOST_REVISION` | `base` or `head` |
+| `PROGNOST_TREE` | the directory it runs in |
+| `PROGNOST_ROOT` | the working tree |
+
+and prints one call per line: where the call is made, then where the
+function it calls is, each `path:line` or `path:line:column`, separated by
+whitespace (or a tab, for paths with spaces). Paths are relative to the tree
+or absolute inside it; anything else on a line, and lines that don't parse
+(calls into the standard library, a header), are skipped. A tool with
+another output format needs a small script to print this one.
+
+Where the resolver reports a call, its targets are taken instead of
+prognost's own resolution; where it reports none, prognost resolves the call
+as without it. Calls it reports are not marked `inferred`. A commit's output
+is kept in the cache, so it runs once per commit; a failing command is
+reported on stderr and prognost carries on without it.
 
 ## Risk rules
 
@@ -68,6 +112,7 @@ under `.route('/api/v1/orders', …)`) is built in.
 | **Across HTTP** | Hono's typed client (`client.api.….$post`) → its routes | ✅ |
 | | `fetch`, axios, other clients | ➖ add a [seam](#seams-calls-joined-by-a-string) |
 | **Across strings** | events, queues, job names, DI tokens | ➖ add a [seam](#seams-calls-joined-by-a-string) |
+| **Type-checked calls** | callbacks, interfaces, dynamic dispatch, as a type checker sees them | ➖ add a [resolver](#resolvers-calls-an-external-tool-resolves) (Go: `callgraph`) |
 | **Risk rules** | call graph (public API, reach), TypeScript and Python (await in loops), Go (defer in loops), PostgreSQL migrations | ✅ built in |
 | | anything else | ➖ your own `[[risk]]` rules, or another analyser's SARIF |
 | **Platforms** | macOS, Linux | ✅ tested in CI |

@@ -20,6 +20,10 @@ follow [Semantic Versioning](https://semver.org/).
   page.
 - Python calls on instances whose class the code states (annotations,
   `x = Repo(…)`, `self.x = …`) reach the class's method.
+- `[[resolver]]` in `prognost.toml`: an external command (Go's
+  `callgraph`, or anything printing call site → function positions) that
+  answers the calls prognost cannot resolve by reading code. Run once per
+  revision; a commit's answer is cached.
 - Presets `go` (`defer-in-loop`) and `python` (`python-await-in-loop`),
   on by default; `ast` rules take `language = "go"` or `"python"`.
 

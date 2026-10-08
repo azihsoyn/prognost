@@ -13,7 +13,7 @@ use crate::ts_extract::TsFunction;
 use crate::tsconfig::TsConfig;
 use crate::workspace::Workspace;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
     /// TypeScript, JavaScript and Svelte's `<script>` blocks.
     TypeScript,

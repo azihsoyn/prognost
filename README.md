@@ -160,14 +160,18 @@ gate. See [docs/rules.md](docs/rules.md).
 3. Calls are resolved across files through imports: barrels, workspace
    packages and tsconfig paths in TypeScript, module packages in Go,
    relative imports and `__init__.py` in Python — and across the HTTP
-   boundary through Hono's typed client. A repository adds its own string-keyed seams (an event
-   name, a queue) in `prognost.toml`.
+   boundary through Hono's typed client. A repository adds its own
+   string-keyed seams (an event name, a queue) in `prognost.toml`, and can
+   hand what only a type checker sees to an external resolver
+   (`callgraph` for Go).
 4. From each changed function, callers are followed up to the entry points:
    routes, components, module code, exports nothing calls.
 
 The graph is inferred: dynamic dispatch, dependency injection and callbacks
 handed through untyped values can hide an edge, so reach is a lower bound,
-never a proof that something else is safe. What it reads is listed below.
+never a proof that something else is safe. A Go call through an interface
+is followed to every implementation, marked as a guess. What it reads is
+listed below.
 
 ## What it supports
 
@@ -194,6 +198,7 @@ never a proof that something else is safe. What it reads is listed below.
 | **Across HTTP** | Hono's typed client (`client.api.….$post`) → its routes | ✅ |
 | | `fetch`, axios, other clients | ➖ add a [seam](docs/config.md#seams-calls-joined-by-a-string) |
 | **Across strings** | events, queues, job names, DI tokens | ➖ add a [seam](docs/config.md#seams-calls-joined-by-a-string) |
+| **Type-checked calls** | callbacks, interfaces, dynamic dispatch, as a type checker sees them | ➖ add a [resolver](docs/config.md#resolvers-calls-an-external-tool-resolves) (Go: `callgraph`) |
 | **Risk rules** | call graph (public API, reach), TypeScript and Python (await in loops), Go (defer in loops), PostgreSQL migrations | ✅ built in |
 | | anything else | ➖ your own `[[risk]]` rules, or another analyser's SARIF |
 | **Platforms** | macOS, Linux | ✅ tested in CI |

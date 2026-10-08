@@ -22,6 +22,7 @@ pub mod python;
 pub mod repo;
 pub mod report;
 pub mod resolve;
+pub mod resolver;
 pub mod rev;
 pub mod risk;
 pub mod rules;

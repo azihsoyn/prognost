@@ -11,7 +11,7 @@
 //! cycles function → file → package → function, re-rooting the graph at
 //! whatever the finer/coarser level's equivalent of the current node is.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -163,6 +163,10 @@ pub struct App {
     /// on an upstream walk, and the same for all of them.
     importers_cache: HashMap<PathBuf, Vec<String>>,
     go_index: Option<GoIndex>,
+    /// The repository's external resolvers, and what each reported, by
+    /// (head?, language).
+    resolvers: Vec<crate::resolver::Resolver>,
+    external: HashMap<(bool, Lang), std::rc::Rc<crate::resolver::Calls>>,
     /// (calling file, function id) reached only through an interface.
     inferred_calls: HashSet<(PathBuf, String)>,
     /// Edges (caller, callee) that are such calls: drawn as guesses.
@@ -347,6 +351,8 @@ impl App {
             function_files,
             importers_cache: HashMap::new(),
             go_index: None,
+            resolvers: Vec::new(),
+            external: HashMap::new(),
             inferred_calls: HashSet::new(),
             inferred_edges: HashSet::new(),
             nodes: vec![GNode {
@@ -428,6 +434,8 @@ impl App {
             function_files: HashMap::new(),
             importers_cache: HashMap::new(),
             go_index: None,
+            resolvers: Vec::new(),
+            external: HashMap::new(),
             inferred_calls: HashSet::new(),
             inferred_edges: HashSet::new(),
             nodes: Vec::new(),
@@ -467,6 +475,7 @@ impl App {
             edit_request: None,
         };
         app.seams = crate::seam::load(&app.root)?;
+        app.resolvers = crate::resolver::load(&app.root)?;
         let mut files_with_roots = 0;
         for file in files.iter().filter(|f| !is_test_file(f)) {
             if !app.ensure_function_file(file) {
@@ -1034,6 +1043,23 @@ impl App {
                 }
             }
         }
+        // Files an external resolver saw calling into this one.
+        if let Some(lang) = Lang::of(file)
+            && self.resolvers.iter().any(|r| r.language == lang)
+        {
+            for head in [true, false] {
+                if let Some(calls) = self.external_calls(head, lang) {
+                    importer_paths.extend(
+                        calls
+                            .into
+                            .get(file)
+                            .into_iter()
+                            .flatten()
+                            .map(|p| p.to_string_lossy().into_owned()),
+                    );
+                }
+            }
+        }
         importer_paths.remove(&file.to_string_lossy().into_owned());
         importer_paths.retain(|p| !is_test_file(std::path::Path::new(p)));
         for p in &importer_paths {
@@ -1122,6 +1148,30 @@ impl App {
             for c in dotted {
                 if self.call_resolves_to(&importer_path, &c, file, label) {
                     accepted.insert(c);
+                }
+            }
+            // Any call an external resolver lands here, whatever it is
+            // spelled (`f(id)` on a function passed in).
+            if Lang::of(&importer_path)
+                .is_some_and(|l| self.resolvers.iter().any(|r| r.language == l))
+            {
+                let mut texts: Vec<String> = self.function_files[&importer_path]
+                    .head_fns
+                    .iter()
+                    .chain(&self.function_files[&importer_path].base_fns)
+                    .flat_map(|f| f.calls.iter().cloned())
+                    .collect();
+                texts.sort();
+                texts.dedup();
+                let target = make_fn_id(file, label);
+                for c in texts {
+                    if self
+                        .external_targets(&importer_path, &c)
+                        .iter()
+                        .any(|(id, _)| *id == target)
+                    {
+                        accepted.insert(c);
+                    }
                 }
             }
             let Some(entry) = self.function_files.get(&importer_path) else {
@@ -1798,6 +1848,15 @@ impl App {
     /// declare the method. Those calls are inferred, and recorded so.
     fn resolve_fragments(&mut self, frag: Fragment) -> Vec<Fragment> {
         let (id, label, status, drillable) = frag.clone();
+        if !drillable && self.granularity == Granularity::Function {
+            let found = self.external_targets(&split_fn_id(&id).0, &label);
+            if !found.is_empty() {
+                return found
+                    .into_iter()
+                    .map(|(target, name)| (target, name, status, true))
+                    .collect();
+            }
+        }
         if let Some(hit) = self.resolve_fragment(frag) {
             return vec![hit];
         }
@@ -1821,6 +1880,121 @@ impl App {
                 (target, last.clone(), status, true)
             })
             .collect()
+    }
+
+    /// What the external resolver for `lang` reported in one revision —
+    /// run on first need, once.
+    fn external_calls(
+        &mut self,
+        head: bool,
+        lang: Lang,
+    ) -> Option<std::rc::Rc<crate::resolver::Calls>> {
+        if let Some(hit) = self.external.get(&(head, lang)) {
+            return Some(hit.clone());
+        }
+        let resolver = self.resolvers.iter().find(|r| r.language == lang)?.clone();
+        let rev = if head { &self.head_rev } else { &self.base_rev };
+        let tree = rev.dir(&self.root)?;
+        let t = std::time::Instant::now();
+        let calls = std::rc::Rc::new(crate::resolver::run(
+            &resolver,
+            &tree,
+            &self.root,
+            if head { "head" } else { "base" },
+            rev.commit_sha(),
+        ));
+        debug_log(&format!(
+            "resolver {lang:?} ({}): {} call sites: {:?}",
+            if head { "head" } else { "base" },
+            calls.by_site.len(),
+            t.elapsed()
+        ));
+        self.external.insert((head, lang), calls.clone());
+        Some(calls)
+    }
+
+    /// The functions an external resolver says the call `label` in
+    /// `file` lands on, in either revision: (id, label). When the line
+    /// holds several calls, the targets named like the call are kept.
+    fn external_targets(&mut self, file: &std::path::Path, label: &str) -> Vec<(String, String)> {
+        let Some(lang) = Lang::of(file) else {
+            return Vec::new();
+        };
+        if !self.resolvers.iter().any(|r| r.language == lang) || !self.ensure_function_file(file) {
+            return Vec::new();
+        }
+        let mut positions: Vec<(bool, PathBuf, u32)> = Vec::new();
+        for head in [true, false] {
+            let entry = &self.function_files[file];
+            let fns = if head {
+                &entry.head_fns
+            } else {
+                &entry.base_fns
+            };
+            let lines: BTreeSet<u32> = fns
+                .iter()
+                .flat_map(|f| f.calls.iter().zip(&f.call_lines))
+                .filter(|(c, _)| *c == label)
+                .map(|(_, l)| *l)
+                .collect();
+            if lines.is_empty() {
+                continue;
+            }
+            let Some(calls) = self.external_calls(head, lang) else {
+                continue;
+            };
+            for line in lines {
+                for (f, l) in calls
+                    .by_site
+                    .get(&(file.to_path_buf(), line))
+                    .into_iter()
+                    .flatten()
+                {
+                    positions.push((head, f.clone(), *l));
+                }
+            }
+        }
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (head, f, line) in positions {
+            if !self.ensure_function_file(&f) {
+                continue;
+            }
+            let entry = &self.function_files[&f];
+            let fns = if head {
+                &entry.head_fns
+            } else {
+                &entry.base_fns
+            };
+            // The innermost function around the line.
+            let Some((i, _)) = fns
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| g.start_line <= line && line <= g.end_line)
+                .min_by_key(|(_, g)| g.end_line - g.start_line)
+            else {
+                continue;
+            };
+            let name = if head {
+                align::label(&fns[i])
+            } else {
+                base_label(entry, i)
+            };
+            let id = make_fn_id(&f, &name);
+            if !out.iter().any(|(x, _)| *x == id) {
+                out.push((id, name));
+            }
+        }
+        let called = label
+            .split('(')
+            .next()
+            .unwrap_or(label)
+            .rsplit('.')
+            .next()
+            .unwrap_or(label);
+        if out.len() > 1 && out.iter().any(|(_, n)| n == called) {
+            out.retain(|(_, n)| n == called);
+        }
+        out
     }
 
     /// Interfaces and method sets of every Go file in either revision.
@@ -5610,6 +5784,24 @@ impl App {
                 })
         }) {
             return Some(c.line);
+        }
+
+        // A call an external resolver placed.
+        if let Some(calls) = Lang::of(&file).and_then(|l| self.external.get(&(true, l)))
+            && let Some(line) = calls
+                .by_site
+                .iter()
+                .filter(|((f, l), targets)| {
+                    *f == file
+                        && within(*l)
+                        && targets
+                            .iter()
+                            .any(|(tf, tl)| *tf == callee_file && cstart <= *tl && *tl <= cend)
+                })
+                .map(|((_, l), _)| *l)
+                .min()
+        {
+            return Some(line);
         }
 
         let name: String = match split_pkg_id(callee) {
