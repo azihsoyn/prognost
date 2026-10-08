@@ -262,7 +262,9 @@ pub fn base_label(
     base_idx: usize,
 ) -> String {
     let matched = alignment.iter().find_map(|a| match a {
-        Alignment::Matched { base: b, head: h, .. } if *b == base_idx => Some(*h),
+        Alignment::Matched {
+            base: b, head: h, ..
+        } if *b == base_idx => Some(*h),
         _ => None,
     });
     match matched {
@@ -345,12 +347,8 @@ const outer = () => {
                 else {
                     return false;
                 };
-                base_fns[*b]
-                    .calls
-                    .contains(&"resetPoolLater".to_string())
-                    && head_fns[*h]
-                        .calls
-                        .contains(&"resetPoolLater".to_string())
+                base_fns[*b].calls.contains(&"resetPoolLater".to_string())
+                    && head_fns[*h].calls.contains(&"resetPoolLater".to_string())
             })
             .count();
         assert_eq!(matched_triggers, 6, "{alignment:#?}");
@@ -371,10 +369,7 @@ const outer = () => {
             })
             .unwrap();
         let changes = call_changes(&base_fns[rotate_pool.0], &head_fns[rotate_pool.1]);
-        assert_eq!(
-            changes,
-            vec![CallChange::Added("drainWaiters".to_string())]
-        );
+        assert_eq!(changes, vec![CallChange::Added("drainWaiters".to_string())]);
 
         // connectOrFail persists and lost its call to resetPool.
         let connect_with_retry = alignment
@@ -432,7 +427,11 @@ const second = () => ys.map((run) => run.id);
                 _ => None,
             })
             .collect();
-        assert_eq!(removed, vec![2], "the callback inside `first` is the removed one");
+        assert_eq!(
+            removed,
+            vec![2],
+            "the callback inside `first` is the removed one"
+        );
     }
 
     #[test]
@@ -479,7 +478,10 @@ export const app = new Hono()
             .iter()
             .position(|f| f.parent == Some(post_base) && f.route.is_none())
             .unwrap();
-        assert_eq!(base_label(&base_fns, &head_fns, &alignment, cb), label(&base_fns[cb]));
+        assert_eq!(
+            base_label(&base_fns, &head_fns, &alignment, cb),
+            label(&base_fns[cb])
+        );
     }
 
     #[test]

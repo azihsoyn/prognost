@@ -180,8 +180,12 @@ fn callers_of(
         }
         out
     };
-    let head_callers = head_idx.map(|h| callers_in(head_fns, h)).unwrap_or_default();
-    let base_callers = base_idx.map(|b| callers_in(base_fns, b)).unwrap_or_default();
+    let head_callers = head_idx
+        .map(|h| callers_in(head_fns, h))
+        .unwrap_or_default();
+    let base_callers = base_idx
+        .map(|b| callers_in(base_fns, b))
+        .unwrap_or_default();
 
     let mut out = Vec::new();
     for &h in &head_callers {

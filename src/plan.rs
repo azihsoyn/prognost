@@ -182,19 +182,30 @@ impl PlanReport {
             "{}  {} → {}\n\n",
             c::bold("prognost plan"),
             c::dim(&short(&self.base)),
-            c::dim(&self.head.as_deref().map(short).unwrap_or_else(|| "working tree".into()))
+            c::dim(
+                &self
+                    .head
+                    .as_deref()
+                    .map(short)
+                    .unwrap_or_else(|| "working tree".into())
+            )
         ));
 
         let n = &self.summary.changed;
         out.push_str(&format!(
             "{}  ({} changed, {} added, {} removed)\n",
-            c::bold(&format!("Changed symbols: {}", n.added + n.changed + n.removed)),
+            c::bold(&format!(
+                "Changed symbols: {}",
+                n.added + n.changed + n.removed
+            )),
             c::yellow(&format!("~{}", n.changed)),
             c::green(&format!("+{}", n.added)),
             c::red(&format!("-{}", n.removed))
         ));
         for s in self.summary.symbols.iter().take(15) {
-            let Some(f) = self.function(&s.id) else { continue };
+            let Some(f) = self.function(&s.id) else {
+                continue;
+            };
             let (mark, paint): (&str, fn(&str) -> String) = match f.change {
                 Change::Added => ("+", c::green),
                 Change::Removed => ("-", c::red),
@@ -206,8 +217,15 @@ impl PlanReport {
             } else {
                 format!(
                     "  {}{}",
-                    c::cyan(&format!("← {} fn / {} pkg", s.reach_functions, s.reach_packages)),
-                    if s.public { format!(" · {}", c::magenta("public")) } else { String::new() }
+                    c::cyan(&format!(
+                        "← {} fn / {} pkg",
+                        s.reach_functions, s.reach_packages
+                    )),
+                    if s.public {
+                        format!(" · {}", c::magenta("public"))
+                    } else {
+                        String::new()
+                    }
                 )
             };
             out.push_str(&format!(
@@ -218,7 +236,10 @@ impl PlanReport {
             ));
         }
         if self.summary.symbols.len() > 15 {
-            out.push_str(&c::dim(&format!("  … {} more (--json for all)\n", self.summary.symbols.len() - 15)));
+            out.push_str(&c::dim(&format!(
+                "  … {} more (--json for all)\n",
+                self.summary.symbols.len() - 15
+            )));
         }
 
         // Files the function list says nothing about.
@@ -234,7 +255,10 @@ impl PlanReport {
             .filter(|f| !with_functions.contains(f.path.as_str()))
             .collect();
         if !others.is_empty() {
-            out.push_str(&format!("\n{}\n", c::bold(&format!("Other changed files: {}", others.len()))));
+            out.push_str(&format!(
+                "\n{}\n",
+                c::bold(&format!("Other changed files: {}", others.len()))
+            ));
             for f in others.iter().take(20) {
                 let mark = match f.change {
                     FileChangeKind::Added => c::green("+"),
@@ -245,7 +269,10 @@ impl PlanReport {
                 out.push_str(&format!("  {mark} {}\n", f.path));
             }
             if others.len() > 20 {
-                out.push_str(&c::dim(&format!("  … {} more (--json for all)\n", others.len() - 20)));
+                out.push_str(&c::dim(&format!(
+                    "  … {} more (--json for all)\n",
+                    others.len() - 20
+                )));
             }
         }
 
@@ -291,5 +318,4 @@ impl PlanReport {
         }
         out
     }
-
 }

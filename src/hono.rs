@@ -30,13 +30,18 @@ static SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\.\s*([A-Za-z_$][\w$]*)|\[\s*['"]([^'"\n]+)['"]\s*\]"#).expect("static regex")
 });
 static MOUNT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\.route\(\s*['"]([^'"\n]*)['"]\s*,\s*([A-Za-z_$][\w$]*)\s*\)"#).expect("static regex")
+    Regex::new(r#"\.route\(\s*['"]([^'"\n]*)['"]\s*,\s*([A-Za-z_$][\w$]*)\s*\)"#)
+        .expect("static regex")
 });
 
 fn segments_of(chain: &str) -> Vec<String> {
     SEGMENT
         .captures_iter(chain)
-        .filter_map(|c| c.get(1).or_else(|| c.get(2)).map(|m| m.as_str().to_string()))
+        .filter_map(|c| {
+            c.get(1)
+                .or_else(|| c.get(2))
+                .map(|m| m.as_str().to_string())
+        })
         .collect()
 }
 
@@ -128,15 +133,26 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, 2);
         assert_eq!(calls[0].0.method, "PUT");
-        assert_eq!(calls[0].0.segments, ["api", "v1", "order-items", ":orderId", ":itemId"]);
+        assert_eq!(
+            calls[0].0.segments,
+            ["api", "v1", "order-items", ":orderId", ":itemId"]
+        );
     }
 
     #[test]
     fn mounts_and_paths() {
-        let m = mounts_in("app.route('/health', HealthCheckController);\nconst x = new Hono()\n  .route('/api/v1/orders', OrderController)\n  .route('/api/v1', NotificationSettingController);");
+        let m = mounts_in(
+            "app.route('/health', HealthCheckController);\nconst x = new Hono()\n  .route('/api/v1/orders', OrderController)\n  .route('/api/v1', NotificationSettingController);",
+        );
         assert_eq!(m.len(), 3);
-        assert_eq!(m[1], ("/api/v1/orders".to_string(), "OrderController".to_string()));
-        assert_eq!(path_segments("/api/v1/orders/:orderId{[0-9]+}/"), ["api", "v1", "orders", ":orderId"]);
+        assert_eq!(
+            m[1],
+            ("/api/v1/orders".to_string(), "OrderController".to_string())
+        );
+        assert_eq!(
+            path_segments("/api/v1/orders/:orderId{[0-9]+}/"),
+            ["api", "v1", "orders", ":orderId"]
+        );
         assert!(same_route(
             &path_segments("/api/v1/orders/:orderId"),
             &path_segments("/api/v1/orders/:id")
@@ -145,6 +161,9 @@ mod tests {
             &path_segments("/api/v1/orders/:orderId"),
             &path_segments("/api/v1/orders")
         ));
-        assert_eq!(split_route_label("DELETE /:orderId"), Some(("DELETE", "/:orderId")));
+        assert_eq!(
+            split_route_label("DELETE /:orderId"),
+            Some(("DELETE", "/:orderId"))
+        );
     }
 }

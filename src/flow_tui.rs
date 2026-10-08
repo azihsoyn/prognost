@@ -44,8 +44,7 @@ const MAX_COL_WIDTH: u16 = 110;
 /// World row 0 holds the column headers, pinned to the top of the
 /// diagram while everything under it scrolls.
 const HEADER_ROW: i32 = 1;
-const KEY_HINT: &str =
-    "↑↓←→ move · shift+↑↓←→ / wheel / drag pan · click select · z/Z package detail · v seen · S/P Viewed ↔ GitHub · m map · a unchanged · c collapse · g level · enter file · q quit";
+const KEY_HINT: &str = "↑↓←→ move · shift+↑↓←→ / wheel / drag pan · click select · z/Z package detail · v seen · S/P Viewed ↔ GitHub · m map · a unchanged · c collapse · g level · enter diff · o edit · q quit";
 const PAN_STEP_X: i32 = 10;
 const PAN_STEP_Y: i32 = 5;
 const WHEEL_STEP_X: i32 = 6;
@@ -266,6 +265,9 @@ pub struct App {
     /// that does is a drag (pan).
     drag: Option<(u16, u16, bool)>,
     quit: bool,
+    /// `o` asked for this file at this line in an editor; the run loop
+    /// opens it, leaving the screen to the editor while it runs.
+    edit_request: Option<(PathBuf, u32)>,
 }
 
 /// A computed unified diff, shown full-screen in place of the graph.
@@ -379,6 +381,7 @@ impl App {
             canvas: Rect::default(),
             drag: None,
             quit: false,
+            edit_request: None,
         };
         // A single node tells a reviewer nothing about reach; expand one
         // hop both ways immediately so there is something to look at
@@ -449,6 +452,7 @@ impl App {
             canvas: Rect::default(),
             drag: None,
             quit: false,
+            edit_request: None,
         };
         app.seams = crate::seam::load(&app.root)?;
         let mut files_with_roots = 0;
@@ -542,9 +546,48 @@ impl App {
                     break;
                 }
             }
+            if let Some((path, line)) = self.edit_request.take() {
+                self.open_in_editor(terminal, &path, line);
+            }
         }
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         result
+    }
+
+    /// `o`: the selected node's file at its line in `$VISUAL`/`$EDITOR`.
+    /// Inside herdr it opens in a pane beside this one and the graph
+    /// stays on screen; elsewhere the editor takes this terminal until it
+    /// exits, and the graph comes back.
+    fn open_in_editor(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        path: &std::path::Path,
+        line: u32,
+    ) {
+        let command = crate::herdr::editor_line(path, line);
+        if crate::herdr::inside() {
+            self.status =
+                match crate::herdr::open_beside(&self.root, &command, "prognost edit", true) {
+                    Ok(pane) => format!("opened {} in herdr pane {pane}", path.display()),
+                    Err(e) => format!("herdr: {e}"),
+                };
+            return;
+        }
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        ratatui::restore();
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(&self.root)
+            .status();
+        *terminal = ratatui::init();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+        let _ = terminal.clear();
+        self.status = match status {
+            Ok(s) if s.success() => format!("back from {}", path.display()),
+            Ok(s) => format!("editor exited with {s}"),
+            Err(e) => format!("could not run the editor: {e}"),
+        };
     }
 
     /// Parses and aligns a file's functions the first time anything from
@@ -602,9 +645,11 @@ impl App {
                 .head_fns
                 .iter()
                 .any(|f| align::label(f) == label && f.parent.is_none() && f.exported)
-                || entry.base_fns.iter().enumerate().any(|(i, f)| {
-                    base_label(entry, i) == label && f.parent.is_none() && f.exported
-                })
+                || entry
+                    .base_fns
+                    .iter()
+                    .enumerate()
+                    .any(|(i, f)| base_label(entry, i) == label && f.parent.is_none() && f.exported)
         })
     }
 
@@ -676,8 +721,12 @@ impl App {
             let base_calls = base_idx
                 .map(|b| inlined_calls(&entry.base_fns, b))
                 .unwrap_or_default();
-            let head_range = (entry.head_fns[head_idx].start_line, entry.head_fns[head_idx].end_line);
-            let base_range = base_idx.map(|b| (entry.base_fns[b].start_line, entry.base_fns[b].end_line));
+            let head_range = (
+                entry.head_fns[head_idx].start_line,
+                entry.head_fns[head_idx].end_line,
+            );
+            let base_range =
+                base_idx.map(|b| (entry.base_fns[b].start_line, entry.base_fns[b].end_line));
             // The repository's own seams: a call site inside this
             // function whose key a definition somewhere carries joins
             // straight to the function around that definition, and the
@@ -688,7 +737,9 @@ impl App {
             let mut folded: Vec<Fragment> = Vec::new();
             let mut seen: HashSet<&str> = HashSet::new();
             for (c, line) in &head_calls {
-                if seam_lines.contains(line) && !entry.head_fns.iter().any(|f| &align::label(f) == c) {
+                if seam_lines.contains(line)
+                    && !entry.head_fns.iter().any(|f| &align::label(f) == c)
+                {
                     continue;
                 }
                 if !seen.insert(c) {
@@ -811,36 +862,40 @@ impl App {
         let base_seam_lines: HashSet<u32> = base_keys.iter().map(|(_, _, l)| *l).collect();
         let mut out: Vec<Fragment> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut resolve = |this: &mut Self, i: usize, key: &str, status: Status, out: &mut Vec<Fragment>| {
-            let defs: Vec<crate::seam::Def> = head
-                .seam_defs
-                .iter()
-                .chain(base.seam_defs.iter())
-                .filter(|(j, d)| *j == i && this.seams[i].same_key(&d.key, key))
-                .map(|(_, d)| d.clone())
-                .collect();
-            for d in defs {
-                if !this.ensure_function_file(&d.file) {
-                    continue;
+        let mut resolve =
+            |this: &mut Self, i: usize, key: &str, status: Status, out: &mut Vec<Fragment>| {
+                let defs: Vec<crate::seam::Def> = head
+                    .seam_defs
+                    .iter()
+                    .chain(base.seam_defs.iter())
+                    .filter(|(j, d)| *j == i && this.seams[i].same_key(&d.key, key))
+                    .map(|(_, d)| d.clone())
+                    .collect();
+                for d in defs {
+                    if !this.ensure_function_file(&d.file) {
+                        continue;
+                    }
+                    let entry = &this.function_files[&d.file];
+                    let label = innermost_at(&entry.head_fns, d.line)
+                        .map(|k| align::label(&entry.head_fns[named_enclosing(&entry.head_fns, k)]))
+                        .or_else(|| {
+                            innermost_at(&entry.base_fns, d.line)
+                                .map(|k| base_label(entry, named_enclosing(&entry.base_fns, k)))
+                        })
+                        .unwrap_or_else(|| format!("module@{}", d.line));
+                    let id = make_fn_id(&d.file, &label);
+                    if seen.insert(id.clone()) {
+                        debug_log(&format!("seam {} : {key} -> {id}", this.seams[i].name));
+                        let drillable = !label.starts_with("module@");
+                        out.push((id, label, status, drillable));
+                    }
                 }
-                let entry = &this.function_files[&d.file];
-                let label = innermost_at(&entry.head_fns, d.line)
-                    .map(|k| align::label(&entry.head_fns[named_enclosing(&entry.head_fns, k)]))
-                    .or_else(|| {
-                        innermost_at(&entry.base_fns, d.line)
-                            .map(|k| base_label(entry, named_enclosing(&entry.base_fns, k)))
-                    })
-                    .unwrap_or_else(|| format!("module@{}", d.line));
-                let id = make_fn_id(&d.file, &label);
-                if seen.insert(id.clone()) {
-                    debug_log(&format!("seam {} : {key} -> {id}", this.seams[i].name));
-                    let drillable = !label.starts_with("module@");
-                    out.push((id, label, status, drillable));
-                }
-            }
-        };
+            };
         for (i, key, _) in &head_keys {
-            let status = if base_keys.iter().any(|(j, k, _)| j == i && self.seams[*i].same_key(k, key)) {
+            let status = if base_keys
+                .iter()
+                .any(|(j, k, _)| j == i && self.seams[*i].same_key(k, key))
+            {
                 Status::Unchanged
             } else {
                 Status::Added
@@ -848,7 +903,10 @@ impl App {
             resolve(self, *i, key, status, &mut out);
         }
         for (i, key, _) in &base_keys {
-            if !head_keys.iter().any(|(j, k, _)| j == i && self.seams[*i].same_key(k, key)) {
+            if !head_keys
+                .iter()
+                .any(|(j, k, _)| j == i && self.seams[*i].same_key(k, key))
+            {
                 resolve(self, *i, key, Status::Removed, &mut out);
             }
         }
@@ -877,7 +935,10 @@ impl App {
         let matching = |scan: &HonoScan| -> Vec<(PathBuf, u32)> {
             scan.seam_calls
                 .iter()
-                .filter(|(i, c)| keys.iter().any(|(j, k)| j == i && self.seams[*i].same_key(k, &c.key)))
+                .filter(|(i, c)| {
+                    keys.iter()
+                        .any(|(j, k)| j == i && self.seams[*i].same_key(k, &c.key))
+                })
                 .map(|(_, c)| (c.file.clone(), c.line))
                 .collect()
         };
@@ -921,7 +982,8 @@ impl App {
             self.ensure_function_file(std::path::Path::new(p));
         }
         let importer_paths: Vec<String> = importer_paths.into_iter().collect();
-        self.importers_cache.insert(file.to_path_buf(), importer_paths.clone());
+        self.importers_cache
+            .insert(file.to_path_buf(), importer_paths.clone());
         importer_paths
     }
 
@@ -937,7 +999,12 @@ impl App {
         target: &std::path::Path,
         label: &str,
     ) -> bool {
-        let frag = (make_fn_id(importer, call), call.to_string(), Status::Unchanged, false);
+        let frag = (
+            make_fn_id(importer, call),
+            call.to_string(),
+            Status::Unchanged,
+            false,
+        );
         match self.resolve_fragment(frag) {
             Some((id, _, _, true)) => id == make_fn_id(target, label),
             Some((id, _, _, false)) => match self.call_file.get(&id) {
@@ -1006,28 +1073,44 @@ impl App {
                     Status::Added
                 };
                 listed.insert(caller_label.clone());
-                out.push((make_fn_id(&importer_path, &caller_label), caller_label, status, true));
+                out.push((
+                    make_fn_id(&importer_path, &caller_label),
+                    caller_label,
+                    status,
+                    true,
+                ));
             }
             for &b in &base_callers {
                 let caller_label = base_label(entry, b);
                 if !listed.insert(caller_label.clone()) {
                     continue;
                 }
-                out.push((make_fn_id(&importer_path, &caller_label), caller_label, Status::Removed, true));
+                out.push((
+                    make_fn_id(&importer_path, &caller_label),
+                    caller_label,
+                    Status::Removed,
+                    true,
+                ));
             }
             // Calls at the top level of the importer — `const pool =
             // createPool(…)` when the module loads — sit in no function:
             // they reach the change as that module's own code.
-            let call = regex::Regex::new(&format!(r"\b{}\s*\(", regex::escape(label))).expect("valid regex");
+            let call = regex::Regex::new(&format!(r"\b{}\s*\(", regex::escape(label)))
+                .expect("valid regex");
             for (rev, fns, raw) in [
                 (&self.head_rev, &entry.head_fns, &mut module_head),
                 (&self.base_rev, &entry.base_fns, &mut module_base),
             ] {
-                let Some(text) = rev.read(&self.root, &importer_path) else { continue };
+                let Some(text) = rev.read(&self.root, &importer_path) else {
+                    continue;
+                };
                 for (i, l) in text.lines().enumerate() {
                     let line = i as u32 + 1;
                     let code = l.trim_start();
-                    if code.starts_with("//") || code.starts_with("import ") || code.starts_with('*') {
+                    if code.starts_with("//")
+                        || code.starts_with("import ")
+                        || code.starts_with('*')
+                    {
                         continue;
                     }
                     if call.is_match(l) && innermost_at(fns, line).is_none() {
@@ -1414,7 +1497,13 @@ impl App {
     /// was added, removed, changed or left alone between the revisions;
     /// for anything without a body of its own (an unresolved call, a
     /// module-level reference), the status of the call that reached it.
-    fn own_status(&mut self, id: &str, label: &str, drillable: bool, call_status: Status) -> Status {
+    fn own_status(
+        &mut self,
+        id: &str,
+        label: &str,
+        drillable: bool,
+        call_status: Status,
+    ) -> Status {
         if self.granularity != Granularity::Function || !drillable || label.starts_with("module@") {
             return call_status;
         }
@@ -1455,12 +1544,16 @@ impl App {
                 .route_table()
                 .entries
                 .iter()
-                .find(|e| e.method == call.method && crate::hono::same_route(&e.segments, &call.segments))
+                .find(|e| {
+                    e.method == call.method && crate::hono::same_route(&e.segments, &call.segments)
+                })
                 .map(|e| (e.file.clone(), e.label.clone()));
             let shown = format!("{} /{}", call.method, call.segments.join("/"));
             debug_log(&format!("rpc call {label} -> {hit:?}"));
             if let Some((f, handler)) = hit {
-                self.call_text.entry(make_fn_id(&f, &handler)).or_insert(label);
+                self.call_text
+                    .entry(make_fn_id(&f, &handler))
+                    .or_insert(label);
                 return Some((make_fn_id(&f, &handler), handler, status, true));
             }
             let new_id = format!("pkg::HTTP API::{shown}");
@@ -1479,7 +1572,11 @@ impl App {
         if segments.len() >= 2
             && let Some(last) = segments.last()
             && self.function_files.get(&file).is_some_and(|entry| {
-                entry.head_fns.iter().chain(&entry.base_fns).any(|f| f.method && align::label(f) == *last)
+                entry
+                    .head_fns
+                    .iter()
+                    .chain(&entry.base_fns)
+                    .any(|f| f.method && align::label(f) == *last)
             })
         {
             return Some((make_fn_id(&file, last), last.to_string(), status, true));
@@ -1500,10 +1597,13 @@ impl App {
                 if self.ensure_function_file(&f) && self.is_importable(&f, imported) {
                     Some((f, imported.clone()))
                 } else {
-                    self.resolve_import(&f, imported).map(|d| (d, imported.clone()))
+                    self.resolve_import(&f, imported)
+                        .map(|d| (d, imported.clone()))
                 }
             }
-            (crate::bindings::Binding::Namespace, Some(mut f)) if plain_chain && segments.len() >= 2 => {
+            (crate::bindings::Binding::Namespace, Some(mut f))
+                if plain_chain && segments.len() >= 2 =>
+            {
                 let mut ok = true;
                 for seg in &segments[1..segments.len() - 1] {
                     match self.reexports_of(&f).get(*seg).cloned() {
@@ -1581,7 +1681,11 @@ impl App {
     /// RPC call sites and router mounts of one revision, scanned once
     /// over every source file — cheap text matching, no parsing.
     fn hono_scan(&mut self, head: bool) -> HonoScan {
-        let cached = if head { &self.hono_head } else { &self.hono_base };
+        let cached = if head {
+            &self.hono_head
+        } else {
+            &self.hono_base
+        };
         if let Some(v) = cached {
             return v.clone();
         }
@@ -1672,8 +1776,10 @@ impl App {
                 mount_paths.insert(f, path);
             }
             let mut entries = Vec::new();
-            let mut mounted: Vec<(PathBuf, Vec<String>)> =
-                mount_paths.iter().map(|(f, p)| (f.clone(), p.clone())).collect();
+            let mut mounted: Vec<(PathBuf, Vec<String>)> = mount_paths
+                .iter()
+                .map(|(f, p)| (f.clone(), p.clone()))
+                .collect();
             mounted.sort();
             for (f, base) in mounted {
                 if !self.ensure_function_file(&f) {
@@ -1726,7 +1832,9 @@ impl App {
         let matching = |sites: Vec<RpcSite>| -> Vec<(PathBuf, u32)> {
             sites
                 .into_iter()
-                .filter(|s| s.call.method == method && crate::hono::same_route(&s.call.segments, &segments))
+                .filter(|s| {
+                    s.call.method == method && crate::hono::same_route(&s.call.segments, &segments)
+                })
                 .map(|s| (s.file, s.line))
                 .collect()
         };
@@ -1771,19 +1879,29 @@ impl App {
     /// names — in HEAD, else BASE. `None` for anything outside the
     /// workspace (an npm package).
     fn resolve_spec(&mut self, spec: &str, from_file: &std::path::Path) -> Option<PathBuf> {
-        let from_dir = from_file.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+        let from_dir = from_file
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_path_buf();
         let key = (from_dir.clone(), spec.to_string());
         if let Some(hit) = self.spec_cache.get(&key) {
             return hit.clone();
         }
         let dir = self.root.join(&from_dir);
         let tsconfig = crate::tsconfig::load_nearest(&self.root, &dir);
-        let found = [(&self.head_rev, &self.head_ws), (&self.base_rev, &self.base_ws)]
-            .into_iter()
-            .find_map(|(rev, ws)| {
-                crate::resolve::resolve(spec, from_file, &self.root, rev, ws, &tsconfig)
-            });
-        debug_log(&format!("resolve_spec {spec} from {} -> {:?}", from_file.display(), found));
+        let found = [
+            (&self.head_rev, &self.head_ws),
+            (&self.base_rev, &self.base_ws),
+        ]
+        .into_iter()
+        .find_map(|(rev, ws)| {
+            crate::resolve::resolve(spec, from_file, &self.root, rev, ws, &tsconfig)
+        });
+        debug_log(&format!(
+            "resolve_spec {spec} from {} -> {:?}",
+            from_file.display(),
+            found
+        ));
         self.spec_cache.insert(key, found.clone());
         found
     }
@@ -1835,7 +1953,8 @@ impl App {
                 (&self.base_rev, &self.base_ws),
                 (&self.head_rev, &self.head_ws),
             ] {
-                let g = crate::graph::reach(&self.root, rev, file, ImportDirection::Dependencies, ws);
+                let g =
+                    crate::graph::reach(&self.root, rev, file, ImportDirection::Dependencies, ws);
                 deps.extend(g.nodes.into_iter().map(|n| n.path));
             }
             let deps: Vec<PathBuf> = deps
@@ -2125,7 +2244,9 @@ impl App {
             }
             KeyCode::Char('P') => {
                 self.status = match self.pull_viewed() {
-                    Ok((i, v, n)) => format!("PR #{n}: {v} Viewed on GitHub · {i} imported as seen"),
+                    Ok((i, v, n)) => {
+                        format!("PR #{n}: {v} Viewed on GitHub · {i} imported as seen")
+                    }
                     Err(e) => format!("could not read Viewed: {e}"),
                 };
             }
@@ -2139,6 +2260,17 @@ impl App {
             KeyCode::Char('g') => self.zoom(),
             KeyCode::Enter if is_agg_id(&self.selected) => self.change_lod(-1),
             KeyCode::Enter => self.open_diff(),
+            KeyCode::Char('o') if !is_agg_id(&self.selected) => {
+                let path = self.selected_path();
+                let line = (self.granularity == Granularity::Function)
+                    .then(|| self.function_scope(&path))
+                    .flatten()
+                    .map(|(_, start, _)| start)
+                    .unwrap_or(1);
+                if !path.as_os_str().is_empty() {
+                    self.edit_request = Some((path, line));
+                }
+            }
             _ => {}
         }
         // Anything that isn't a pan may have moved or revealed the
@@ -2148,7 +2280,10 @@ impl App {
                 k.code,
                 KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
             ))
-            || matches!(k.code, KeyCode::Char('H' | 'J' | 'K' | 'L' | '0' | 'm' | 'v' | 'V' | 'S' | 'P'));
+            || matches!(
+                k.code,
+                KeyCode::Char('H' | 'J' | 'K' | 'L' | '0' | 'm' | 'v' | 'V' | 'S' | 'P')
+            );
         if !is_pan {
             self.follow = true;
         }
@@ -2159,14 +2294,24 @@ impl App {
     fn open_seen(&mut self) {
         let base = self.base_rev.commit_sha().unwrap_or("HEAD").to_string();
         let head = self.head_rev.commit_sha().map(str::to_string);
-        self.seen = Some(crate::seen::SeenStore::open(&self.root, &base, head.as_deref()));
+        self.seen = Some(crate::seen::SeenStore::open(
+            &self.root,
+            &base,
+            head.as_deref(),
+        ));
         self.refresh_seen();
     }
 
     /// Recomputes the progress cache for every file a node points into.
     pub fn refresh_seen(&mut self) {
-        let files: HashSet<PathBuf> = self.nodes.iter().filter_map(|n| self.node_file(&n.id)).collect();
-        let Some(seen) = self.seen.as_mut() else { return };
+        let files: HashSet<PathBuf> = self
+            .nodes
+            .iter()
+            .filter_map(|n| self.node_file(&n.id))
+            .collect();
+        let Some(seen) = self.seen.as_mut() else {
+            return;
+        };
         let mut progress = HashMap::new();
         for f in files {
             let p = f.to_string_lossy().into_owned();
@@ -2181,7 +2326,11 @@ impl App {
     /// under an aggregate.
     fn files_of_view(&self, id: &str) -> Vec<String> {
         let geo = self.geometry();
-        let members = geo.members_of.get(id).cloned().unwrap_or_else(|| vec![id.to_string()]);
+        let members = geo
+            .members_of
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| vec![id.to_string()]);
         let mut out: Vec<String> = members
             .iter()
             .filter_map(|m| self.node_file(m))
@@ -2317,7 +2466,8 @@ impl App {
     /// for it.
     fn change_lod(&mut self, delta: i32) {
         let pkg = self.view_pkg(&self.selected);
-        let level = (self.lod_of(&pkg) as i32 + delta).clamp(LOD_FUNCTION as i32, LOD_PACKAGE as i32) as u8;
+        let level =
+            (self.lod_of(&pkg) as i32 + delta).clamp(LOD_FUNCTION as i32, LOD_PACKAGE as i32) as u8;
         if level == self.lod_of(&pkg) {
             self.status = format!(
                 "{pkg} is already at its {} level",
@@ -2326,7 +2476,12 @@ impl App {
             return;
         }
         let old = self.selected.clone();
-        let old_members = self.geometry().members_of.get(&old).cloned().unwrap_or_default();
+        let old_members = self
+            .geometry()
+            .members_of
+            .get(&old)
+            .cloned()
+            .unwrap_or_default();
         self.lod.insert(pkg.clone(), level);
         let geo = self.geometry();
         if !geo.rows.contains_key(&old) {
@@ -2463,7 +2618,8 @@ impl App {
     fn zoom(&mut self) {
         let current = self.selected.clone();
         if is_ext_id(&current) || is_agg_id(&current) {
-            self.status = "an unresolved call or a group has no file of its own to zoom into".into();
+            self.status =
+                "an unresolved call or a group has no file of its own to zoom into".into();
             return;
         }
         match self.granularity {
@@ -2761,7 +2917,11 @@ impl App {
         const IMPACT_ROWS: u16 = 2;
         // The key hint wraps onto a second row in a narrow terminal
         // rather than losing its tail.
-        let key_rows: u16 = if KEY_HINT.chars().count() as u16 > area.width { 2 } else { 1 };
+        let key_rows: u16 = if KEY_HINT.chars().count() as u16 > area.width {
+            2
+        } else {
+            1
+        };
         let footer_rows: u16 = 2 + key_rows;
 
         let top = Rect {
@@ -2855,7 +3015,13 @@ impl App {
         self.canvas = diagram;
         self.aim_camera(&geo, diagram);
         self.minimap = minimap_layout(&geo, diagram, self.show_minimap);
-        f.render_widget(GraphWidget { app: self, geo: &geo }, diagram);
+        f.render_widget(
+            GraphWidget {
+                app: self,
+                geo: &geo,
+            },
+            diagram,
+        );
     }
 
     /// Keeps the camera inside the world, and — after a keyboard move —
@@ -3169,7 +3335,11 @@ impl Impact {
 /// bumping ranks until its iteration cap — four hundred columns for one
 /// package, once.
 fn longest_path_ranks(ids: &[String], edges: &[(String, String)]) -> HashMap<String, usize> {
-    let index: HashMap<&str, usize> = ids.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
     let mut out: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
     for (a, b) in edges {
         if let (Some(&i), Some(&j)) = (index.get(a.as_str()), index.get(b.as_str())) {
@@ -3213,7 +3383,10 @@ fn longest_path_ranks(ids: &[String], edges: &[(String, String)]) -> HashMap<Str
             }
         }
     }
-    ids.iter().enumerate().map(|(i, id)| (id.clone(), rank[i])).collect()
+    ids.iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), rank[i]))
+        .collect()
 }
 
 /// A relative polyline with its status, endpoints and arrowhead cell.
@@ -3320,7 +3493,14 @@ impl App {
     /// per pair, with the strongest status among the calls they stand
     /// for (added or removed wins over changed wins over unchanged).
     #[allow(clippy::type_complexity)]
-    fn view(&self) -> (Vec<ViewNode>, Vec<(String, String, Status)>, HashMap<String, String>, HashMap<String, Vec<String>>) {
+    fn view(
+        &self,
+    ) -> (
+        Vec<ViewNode>,
+        Vec<(String, String, Status)>,
+        HashMap<String, String>,
+        HashMap<String, Vec<String>>,
+    ) {
         let visible: Vec<&GNode> = self
             .nodes
             .iter()
@@ -3407,12 +3587,21 @@ impl App {
                 Status::Unchanged
             };
             v.origin = members.iter().any(|m| self.origins.contains(m));
-            let files: HashSet<PathBuf> = members.iter().filter_map(|m| self.node_file(m)).collect();
+            let files: HashSet<PathBuf> =
+                members.iter().filter_map(|m| self.node_file(m)).collect();
             let fns = members.len();
-            let (_, rest) = v.id.strip_prefix("agg::").unwrap().split_once("::").unwrap();
+            let (_, rest) =
+                v.id.strip_prefix("agg::")
+                    .unwrap()
+                    .split_once("::")
+                    .unwrap();
             let (level, key) = rest.split_once("::").unwrap();
             v.display = match level {
-                "1" => format!("{} · {fns} function{}", basename(key), if fns == 1 { "" } else { "s" }),
+                "1" => format!(
+                    "{} · {fns} function{}",
+                    basename(key),
+                    if fns == 1 { "" } else { "s" }
+                ),
                 "2" => {
                     // The directory on its own line, the counts under
                     // it — one long line per directory read as clutter.
@@ -3450,7 +3639,12 @@ impl App {
         let dir_keys: Vec<(String, String)> = view
             .iter()
             .filter(|v| v.id.starts_with("agg::") && v.id.contains("::2::"))
-            .map(|v| (v.pkg.clone(), v.id.rsplit("::").next().unwrap_or("").to_string()))
+            .map(|v| {
+                (
+                    v.pkg.clone(),
+                    v.id.rsplit("::").next().unwrap_or("").to_string(),
+                )
+            })
             .collect();
         for v in view.iter_mut() {
             if !(v.id.starts_with("agg::") && v.id.contains("::2::")) {
@@ -3458,7 +3652,11 @@ impl App {
             }
             let key = v.id.rsplit("::").next().unwrap_or("").to_string();
             let segs: Vec<&str> = key.split('/').filter(|s| !s.is_empty()).collect();
-            let siblings: Vec<&String> = dir_keys.iter().filter(|(p, _)| *p == v.pkg).map(|(_, k)| k).collect();
+            let siblings: Vec<&String> = dir_keys
+                .iter()
+                .filter(|(p, _)| *p == v.pkg)
+                .map(|(_, k)| k)
+                .collect();
             let mut shared: Option<String> = None;
             for n in (1..segs.len()).rev() {
                 let prefix = segs[..n].join("/");
@@ -3482,7 +3680,8 @@ impl App {
                     .display
                     .chars()
                     .count()
-                    .max(v.sub.as_ref().map_or(0, |t| t.chars().count())) as i32;
+                    .max(v.sub.as_ref().map_or(0, |t| t.chars().count()))
+                    as i32;
             }
         }
         // Edges, mapped and deduplicated.
@@ -3544,7 +3743,10 @@ impl App {
         // Depth within the package.
         let lrank: HashMap<String, usize> = longest_path_ranks(
             &members,
-            &intra.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect::<Vec<_>>(),
+            &intra
+                .iter()
+                .map(|(a, b, _)| (a.clone(), b.clone()))
+                .collect::<Vec<_>>(),
         );
         let ncols = lrank.values().max().map_or(0, |m| m + 1).max(1);
         // Calls from one function to one other package share a channel
@@ -3578,14 +3780,18 @@ impl App {
             }
         }
         bands.sort_by_cached_key(|(_, ids)| {
-            ids.iter().map(|id| (lrank[id], appearance(id))).min().unwrap_or((0, 0))
+            ids.iter()
+                .map(|id| (lrank[id], appearance(id)))
+                .min()
+                .unwrap_or((0, 0))
         });
         let show_file_headers = self.granularity == Granularity::Function;
         let mut rows: HashMap<String, i32> = HashMap::new();
         let mut headers: Vec<(usize, i32, String)> = Vec::new();
         let mut dir_headers: Vec<(usize, i32, String)> = Vec::new();
         let mut cursor: Vec<i32> = vec![content_top; ncols];
-        let pred_row = |a: &str, rows: &HashMap<String, i32>| -> Option<i32> { rows.get(a).copied() };
+        let pred_row =
+            |a: &str, rows: &HashMap<String, i32>| -> Option<i32> { rows.get(a).copied() };
         for (dir, ids) in &bands {
             let mut sub_top = cursor.iter().copied().max().unwrap_or(content_top);
             if let Some(dir) = dir
@@ -3646,7 +3852,9 @@ impl App {
                 for (file, g, ..) in groups {
                     if show_file_headers && let Some(file) = &file {
                         let mut label = basename(&file.to_string_lossy()).to_string();
-                        label.push_str(&seen_note(self.seen_progress.get(&file.to_string_lossy().into_owned())));
+                        label.push_str(&seen_note(
+                            self.seen_progress.get(&file.to_string_lossy().into_owned()),
+                        ));
                         headers.push((c, cursor[c], label));
                         cursor[c] += 1;
                     }
@@ -3705,7 +3913,10 @@ impl App {
                 let key = format!("row:{y0}");
                 let span = (y1 - y0).abs();
                 let k = (c, key.clone());
-                key_span.entry(k).and_modify(|s| *s = (*s).max(span)).or_insert(span);
+                key_span
+                    .entry(k)
+                    .and_modify(|s| *s = (*s).max(span))
+                    .or_insert(span);
                 hops.push((c, key, y0, y1));
                 y0 = y1;
             }
@@ -3870,10 +4081,8 @@ impl App {
         let (view, edges, view_of, members_of) = self.view();
 
         // 2. Packages, ranked by who calls whom.
-        let pkg_of: HashMap<String, String> = view
-            .iter()
-            .map(|n| (n.id.clone(), n.pkg.clone()))
-            .collect();
+        let pkg_of: HashMap<String, String> =
+            view.iter().map(|n| (n.id.clone(), n.pkg.clone())).collect();
         let mut pkg_names: Vec<String> = Vec::new();
         for n in &view {
             let p = &pkg_of[&n.id];
@@ -3910,7 +4119,10 @@ impl App {
         let inter: Vec<(String, String, Status, usize, usize)> = edges
             .iter()
             .filter_map(|(a, b, s)| {
-                let (pa, pb) = (pkg_rank[pkg_index[pkg_of[a].as_str()]], pkg_rank[pkg_index[pkg_of[b].as_str()]]);
+                let (pa, pb) = (
+                    pkg_rank[pkg_index[pkg_of[a].as_str()]],
+                    pkg_rank[pkg_index[pkg_of[b].as_str()]],
+                );
                 (pb > pa).then(|| (a.clone(), b.clone(), *s, pa, pb))
             })
             .collect();
@@ -3978,7 +4190,10 @@ impl App {
             }
             for (k, (_, _, _, pa, pb)) in inter.iter().enumerate() {
                 if *pa < r && r < *pb {
-                    let bary = pass_rows.get(&(k, r - 1)).map(|y| *y as f64).unwrap_or(f64::MAX);
+                    let bary = pass_rows
+                        .get(&(k, r - 1))
+                        .map(|y| *y as f64)
+                        .unwrap_or(f64::MAX);
                     items.push((bary, boxes.len() + k, k, false));
                 }
             }
@@ -3995,7 +4210,11 @@ impl App {
                     placed[idx] = true;
                     next_free = ideal + boxes[idx].height + 1;
                 } else {
-                    let y = if bary == f64::MAX { next_free } else { (bary.round() as i32).max(next_free) };
+                    let y = if bary == f64::MAX {
+                        next_free
+                    } else {
+                        (bary.round() as i32).max(next_free)
+                    };
                     pass_rows.insert((idx, r), y);
                     next_free = y + 1;
                 }
@@ -4072,9 +4291,15 @@ impl App {
             let (sbox, tbox) = (&boxes[sb], &boxes[tb]);
             let (sx, sy) = (box_x(sbox), box_y[sb]);
             let (tx0, ty0) = (box_x(tbox), box_y[tb]);
-            let Some((exit_pts, exit_row)) = sbox.exits.get(&(a.clone(), b.clone())) else { continue };
-            let Some((entry_pts, land, entry_row)) = tbox.entries.get(&(a.clone(), b.clone())) else { continue };
-            let mut points: Vec<(i32, i32)> = exit_pts.iter().map(|(x, y)| (sx + x, sy + y)).collect();
+            let Some((exit_pts, exit_row)) = sbox.exits.get(&(a.clone(), b.clone())) else {
+                continue;
+            };
+            let Some((entry_pts, land, entry_row)) = tbox.entries.get(&(a.clone(), b.clone()))
+            else {
+                continue;
+            };
+            let mut points: Vec<(i32, i32)> =
+                exit_pts.iter().map(|(x, y)| (sx + x, sy + y)).collect();
             let mut y = sy + exit_row;
             for g in *pa..*pb {
                 let slot = gap_edges[g].iter().position(|&e| e == k).unwrap_or(0) as i32;
@@ -4100,7 +4325,10 @@ impl App {
         let world_h = pkg_boxes.iter().map(|b| b.y1).max().unwrap_or(HEADER_ROW) + 2;
 
         Geometry {
-            edges: edges.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect(),
+            edges: edges
+                .iter()
+                .map(|(a, b, _)| (a.clone(), b.clone()))
+                .collect(),
             nodes: view,
             view_of,
             members_of,
@@ -4347,7 +4575,10 @@ impl App {
     fn walk_upstream_inner(&mut self, hops: usize) -> bool {
         for _ in 0..hops {
             if self.nodes.len() > WALK_NODE_CAP {
-                debug_log(&format!("walk_upstream: stopping at {} nodes", self.nodes.len()));
+                debug_log(&format!(
+                    "walk_upstream: stopping at {} nodes",
+                    self.nodes.len()
+                ));
                 return true;
             }
             let upstream = self.upstream_closure();
@@ -4387,14 +4618,17 @@ impl App {
             e.0.insert(file);
             e.1 += 1;
         }
-        let mut affected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut affected: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for id in &upstream {
             *affected.entry(pkg_of(id)).or_default() += 1;
         }
         // Calls across package borders that touch the changed code: into
         // it or its upstream chain, or out of it.
-        let mut crossings: std::collections::BTreeMap<(String, String), (usize, usize, Vec<String>)> =
-            std::collections::BTreeMap::new();
+        let mut crossings: std::collections::BTreeMap<
+            (String, String),
+            (usize, usize, Vec<String>),
+        > = std::collections::BTreeMap::new();
         for ((a, b), status) in &self.edges {
             let (pa, pb) = (pkg_of(a), pkg_of(b));
             if pa == pb {
@@ -4410,7 +4644,11 @@ impl App {
             if *status != Status::Unchanged {
                 e.1 += 1;
             }
-            if let Some(display) = self.nodes.iter().find(|n| n.id == *b).map(|n| n.display.clone())
+            if let Some(display) = self
+                .nodes
+                .iter()
+                .find(|n| n.id == *b)
+                .map(|n| n.display.clone())
                 && display.starts_with(|c: char| c.is_ascii_uppercase())
                 && display.contains(" /")
                 && !e.2.contains(&display)
@@ -4429,13 +4667,15 @@ impl App {
             affected: affected.into_iter().collect(),
             crossings: crossings
                 .into_iter()
-                .map(|((from, to), (calls, changed_calls, routes))| ImpactCrossing {
-                    from,
-                    to,
-                    calls,
-                    changed_calls,
-                    routes,
-                })
+                .map(
+                    |((from, to), (calls, changed_calls, routes))| ImpactCrossing {
+                        from,
+                        to,
+                        calls,
+                        changed_calls,
+                        routes,
+                    },
+                )
                 .collect(),
         }
     }
@@ -4580,12 +4820,19 @@ impl App {
                 changed: summary
                     .changed
                     .iter()
-                    .map(|(p, f, n)| PackageChange { package: p.clone(), files: *f, functions: *n })
+                    .map(|(p, f, n)| PackageChange {
+                        package: p.clone(),
+                        files: *f,
+                        functions: *n,
+                    })
                     .collect(),
                 affected: summary
                     .affected
                     .iter()
-                    .map(|(p, n)| PackageAffected { package: p.clone(), functions: *n })
+                    .map(|(p, n)| PackageAffected {
+                        package: p.clone(),
+                        functions: *n,
+                    })
                     .collect(),
                 crossings: summary
                     .crossings
@@ -4600,7 +4847,10 @@ impl App {
                     .collect(),
             },
             truncated,
-            limits: Limits { hops, nodes: WALK_NODE_CAP },
+            limits: Limits {
+                hops,
+                nodes: WALK_NODE_CAP,
+            },
         }
     }
 
@@ -4632,7 +4882,8 @@ impl App {
                     .and_then(|p| p.name.clone())
             })
         };
-        let package_key = |id: &str| package_of(id).unwrap_or_else(|| "(outside any package)".to_string());
+        let package_key =
+            |id: &str| package_of(id).unwrap_or_else(|| "(outside any package)".to_string());
         let upstream_of = |o: &str| -> HashSet<String> {
             let mut seen: HashSet<String> = HashSet::new();
             let mut stack = vec![o.to_string()];
@@ -4645,8 +4896,11 @@ impl App {
             }
             seen
         };
-        let entry_of: HashMap<&str, crate::impact::EntryKind> =
-            impact.chains.iter().map(|c| (c.entry.id.as_str(), c.entry.kind)).collect();
+        let entry_of: HashMap<&str, crate::impact::EntryKind> = impact
+            .chains
+            .iter()
+            .map(|c| (c.entry.id.as_str(), c.entry.kind))
+            .collect();
         let exported = |id: &str| -> bool {
             let (file, label) = split_fn_id(id);
             self.function_files
@@ -4665,7 +4919,12 @@ impl App {
             let own = package_key(&f.id);
             let mut called_from: Vec<String> = callers
                 .get(f.id.as_str())
-                .map(|v| v.iter().map(|a| package_key(a)).filter(|p| *p != own).collect())
+                .map(|v| {
+                    v.iter()
+                        .map(|a| package_key(a))
+                        .filter(|p| *p != own)
+                        .collect()
+                })
                 .unwrap_or_default();
             called_from.sort();
             called_from.dedup();
@@ -4676,13 +4935,20 @@ impl App {
                 reach_functions: up.iter().filter(|u| !origins.contains(u.as_str())).count(),
                 reach_files: files.len(),
                 reach_packages: pkgs.len(),
-                reach_entries: up.iter().filter(|u| entry_of.contains_key(u.as_str())).count()
+                reach_entries: up
+                    .iter()
+                    .filter(|u| entry_of.contains_key(u.as_str()))
+                    .count()
                     + usize::from(entry_of.contains_key(f.id.as_str())),
             });
             all_up.extend(up);
         }
         all_up.retain(|u| !origins.contains(u.as_str()));
-        symbols.sort_by(|a, b| b.reach_functions.cmp(&a.reach_functions).then_with(|| a.id.cmp(&b.id)));
+        symbols.sort_by(|a, b| {
+            b.reach_functions
+                .cmp(&a.reach_functions)
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         // Facts: the functions — changed, then upstream — in one shape.
         let mut ids: Vec<String> = impact.changed.iter().map(|f| f.id.clone()).collect();
@@ -4697,9 +4963,16 @@ impl App {
                     id: f.id,
                     name: f.name,
                     path: f.path,
-                    range: LineRange { start: f.line, end: f.to },
+                    range: LineRange {
+                        start: f.line,
+                        end: f.to,
+                    },
                     side: f.side,
-                    change: if origins.contains(id.as_str()) { f.change } else { Change::Unchanged },
+                    change: if origins.contains(id.as_str()) {
+                        f.change
+                    } else {
+                        Change::Unchanged
+                    },
                     package: f.package,
                     exported: exported(id),
                     route: f.route,
@@ -4732,27 +5005,28 @@ impl App {
         calls.sort_by(|x, y| (&x.caller, &x.callee).cmp(&(&y.caller, &y.callee)));
 
         // Facts: the files.
-        let files: Vec<FileChange> = crate::origin::changed_file_statuses(&self.root, &self.base_rev, &self.head_rev)?
-            .into_iter()
-            .map(|st| {
-                let package = self
-                    .head_ws
-                    .owning_package(&st.path)
-                    .or_else(|| self.base_ws.owning_package(&st.path))
-                    .and_then(|p| p.name.clone());
-                FileChange {
-                    path: st.path.to_string_lossy().into_owned(),
-                    change: match st.status {
-                        'A' | 'C' => FileChangeKind::Added,
-                        'D' => FileChangeKind::Deleted,
-                        'R' => FileChangeKind::Renamed,
-                        _ => FileChangeKind::Modified,
-                    },
-                    previous_path: st.from.map(|p| p.to_string_lossy().into_owned()),
-                    package,
-                }
-            })
-            .collect();
+        let files: Vec<FileChange> =
+            crate::origin::changed_file_statuses(&self.root, &self.base_rev, &self.head_rev)?
+                .into_iter()
+                .map(|st| {
+                    let package = self
+                        .head_ws
+                        .owning_package(&st.path)
+                        .or_else(|| self.base_ws.owning_package(&st.path))
+                        .and_then(|p| p.name.clone());
+                    FileChange {
+                        path: st.path.to_string_lossy().into_owned(),
+                        change: match st.status {
+                            'A' | 'C' => FileChangeKind::Added,
+                            'D' => FileChangeKind::Deleted,
+                            'R' => FileChangeKind::Renamed,
+                            _ => FileChangeKind::Modified,
+                        },
+                        previous_path: st.from.map(|p| p.to_string_lossy().into_owned()),
+                        package,
+                    }
+                })
+                .collect();
 
         // Summary: the reach together.
         let mut per_pkg: BTreeMap<String, (usize, HashSet<PathBuf>)> = BTreeMap::new();
@@ -4765,10 +5039,19 @@ impl App {
         }
         let mut packages: Vec<PackageReach> = per_pkg
             .into_iter()
-            .map(|(package, (functions, files))| PackageReach { package, functions, files: files.len() })
+            .map(|(package, (functions, files))| PackageReach {
+                package,
+                functions,
+                files: files.len(),
+            })
             .collect();
-        packages.sort_by(|a, b| b.functions.cmp(&a.functions).then_with(|| a.package.cmp(&b.package)));
-        let reach_files: HashSet<PathBuf> = all_up.iter().filter_map(|u| self.node_file(u)).collect();
+        packages.sort_by(|a, b| {
+            b.functions
+                .cmp(&a.functions)
+                .then_with(|| a.package.cmp(&b.package))
+        });
+        let reach_files: HashSet<PathBuf> =
+            all_up.iter().filter_map(|u| self.node_file(u)).collect();
         let mut entries: BTreeMap<String, usize> = BTreeMap::new();
         for f in &functions {
             if let Some(k) = f.entry {
@@ -4779,7 +5062,12 @@ impl App {
                 *entries.entry(kind).or_default() += 1;
             }
         }
-        let count = |c: Change| functions.iter().filter(|f| f.change == c && origins.contains(f.id.as_str())).count();
+        let count = |c: Change| {
+            functions
+                .iter()
+                .filter(|f| f.change == c && origins.contains(f.id.as_str()))
+                .count()
+        };
         let with_functions: HashSet<&str> = functions
             .iter()
             .filter(|f| origins.contains(f.id.as_str()))
@@ -4821,7 +5109,9 @@ impl App {
         use crate::impact::{Change, Function, Side};
         let (line, to, route) = self.node_place(id);
         let node = self.nodes.iter().find(|n| n.id == id);
-        let display = node.map(|n| n.display.clone()).unwrap_or_else(|| split_fn_id(id).1.to_string());
+        let display = node
+            .map(|n| n.display.clone())
+            .unwrap_or_else(|| split_fn_id(id).1.to_string());
         let name = match display.rsplit_once(" · L") {
             Some((head, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => {
                 head.to_string()
@@ -4839,7 +5129,10 @@ impl App {
         Function {
             id: id.to_string(),
             name,
-            path: path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            path: path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             line,
             to,
             side: if in_head { Side::Head } else { Side::Base },
@@ -4877,7 +5170,10 @@ impl App {
             return Some(l);
         }
         let entry = self.function_files.get(&file)?;
-        let idx = entry.head_fns.iter().position(|f| align::label(f) == label)?;
+        let idx = entry
+            .head_fns
+            .iter()
+            .position(|f| align::label(f) == label)?;
         let (start, end) = (entry.head_fns[idx].start_line, entry.head_fns[idx].end_line);
         let within = |l: u32| start <= l && l <= end;
 
@@ -4909,9 +5205,13 @@ impl App {
         if let Some((_, c)) = seam_calls.iter().find(|(i, c)| {
             c.file == file
                 && within(c.line)
-                && keys
-                    .iter()
-                    .any(|(j, k)| j == i && self.seams.get(*i).is_some_and(|s| crate::seam::Seam::same_key(s, k, &c.key)))
+                && keys.iter().any(|(j, k)| {
+                    j == i
+                        && self
+                            .seams
+                            .get(*i)
+                            .is_some_and(|s| crate::seam::Seam::same_key(s, k, &c.key))
+                })
         }) {
             return Some(c.line);
         }
@@ -4937,8 +5237,8 @@ impl App {
         let text = self.head_rev.read(&self.root, &file)?;
         let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(&last))).ok()?;
         let own = |n: u32| callee_file == file && cstart <= n && n <= cend;
-        let whole_component = file.extension().is_some_and(|e| e == "svelte")
-            && entry.head_fns[idx].parent.is_none();
+        let whole_component =
+            file.extension().is_some_and(|e| e == "svelte") && entry.head_fns[idx].parent.is_none();
         text.lines()
             .enumerate()
             .map(|(i, l)| (i as u32 + 1, l))
@@ -4979,7 +5279,11 @@ impl App {
         if let Some((_, l)) = self.call_file.get(id) {
             return (*l, *l, None);
         }
-        if let Some(l) = split_fn_id(id).1.strip_prefix("module@").and_then(|l| l.parse().ok()) {
+        if let Some(l) = split_fn_id(id)
+            .1
+            .strip_prefix("module@")
+            .and_then(|l| l.parse().ok())
+        {
             return (l, l, None);
         }
         let (f, label) = split_fn_id(id);
@@ -5016,10 +5320,15 @@ impl App {
                 None => (String::new(), String::new()),
             };
             let (line, end, route) = self.node_place(&n.id);
-            let path = file.as_ref().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            let path = file
+                .as_ref()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
             // The line goes in its own field; the label loses its " · L12".
             let label = match n.display.rsplit_once(" · L") {
-                Some((head, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => {
+                Some((head, tail))
+                    if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) =>
+                {
                     head.to_string()
                 }
                 _ => n.display.clone(),
@@ -5205,7 +5514,9 @@ fn draw_world(app: &App, geo: &Geometry) -> Buffer {
         1,
         0,
         "packages left → right by who calls whom · inside a package, left → right by call depth",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     );
 
     // Box titles over the top border.
@@ -5298,7 +5609,8 @@ impl Widget for GraphWidget<'_> {
                 if wx < 0 || wx >= world_rect.width as i32 {
                     continue;
                 }
-                buf[(area.x + sx as u16, area.y + sy as u16)] = world[(wx as u16, wy as u16)].clone();
+                buf[(area.x + sx as u16, area.y + sy as u16)] =
+                    world[(wx as u16, wy as u16)].clone();
             }
         }
 
@@ -5387,8 +5699,11 @@ fn draw_diff(f: &mut Frame, area: Rect, view: &DiffView) {
         ..area
     };
     f.render_widget(
-        Paragraph::new(format!("file — {}{}   (+ added, - removed)", view.title, view.seen_note))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(format!(
+            "file — {}{}   (+ added, - removed)",
+            view.title, view.seen_note
+        ))
+        .style(Style::default().add_modifier(Modifier::BOLD)),
         header,
     );
     let text = ratatui::text::Text::from_iter(
@@ -5673,7 +5988,11 @@ fn basename(path: &str) -> &str {
 fn debug_log(line: &str) {
     if let Ok(path) = std::env::var("PROGNOST_DEBUG") {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "{line}");
         }
     }

@@ -364,7 +364,13 @@ mod tests {
         let workspace = crate::workspace::discover(root, &Rev::working()).unwrap();
         let target = PathBuf::from("packages/backend/db-pool/src/index.ts");
 
-        let fragment = reach(root, &Rev::working(), &target, Direction::Callers, &workspace);
+        let fragment = reach(
+            root,
+            &Rev::working(),
+            &target,
+            Direction::Callers,
+            &workspace,
+        );
         let mut paths: Vec<&str> = fragment.nodes.iter().map(|n| n.path.as_str()).collect();
         paths.sort();
         assert_eq!(

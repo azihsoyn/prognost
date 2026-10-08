@@ -2,19 +2,21 @@
 name = "prognost"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "A prognosis for a code change: what a diff touches, how far it reaches through its callers, and what looks risky"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/azihsoyn/prognost"
-keywords = ["ratatui", "tui", "code-review", "call-graph", "diff"]
-categories = ["command-line-interface"]
+homepage = "https://github.com/azihsoyn/prognost"
+readme = "README.md"
+keywords = ["code-review", "call-graph", "diff", "typescript", "tui"]
+categories = ["command-line-utilities", "development-tools"]
 # The README's images and the demo stay in the repository, not the crate.
-exclude = ["docs/demo/*.gif", "docs/demo/*.png", "assets/"]
+exclude = ["docs/demo/*.gif", "docs/demo/*.png", "assets/*.svg"]
 
 [dependencies]
 anyhow = "1.0.104"
 crossterm = "0.29.0"
 ratatui = "0.30.2"
-ratatui-dnd = { git = "https://github.com/azihsoyn/ratatui-dnd" }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

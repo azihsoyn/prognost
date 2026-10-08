@@ -9,7 +9,9 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     High,
@@ -75,14 +77,18 @@ fn contains_exit(node: tree_sitter::Node) -> bool {
             return true;
         }
         for i in 0..n.child_count() {
-            let Some(c) = n.child(i as u32) else { continue };
+            let Some(c) = n.child(i) else { continue };
             if FUNCTION_KINDS.contains(&c.kind()) {
                 continue;
             }
             let inner = in_inner_loop
                 || matches!(
                     c.kind(),
-                    "for_statement" | "for_in_statement" | "while_statement" | "do_statement" | "switch_statement"
+                    "for_statement"
+                        | "for_in_statement"
+                        | "while_statement"
+                        | "do_statement"
+                        | "switch_statement"
                 );
             stack.push((c, inner));
         }
@@ -245,8 +251,10 @@ pub fn statements(text: &str) -> Vec<(u32, String)> {
 /// `-- +migrate Down`) — what follows runs on rollback only. Line
 /// numbers are unchanged.
 pub fn forward_half(text: &str) -> String {
-    let down = Regex::new(r"(?i)^\s*--\s*(?:migrate:down|\+migrate\s+down|\+goose\s+down|down\s+migration)\b")
-        .expect("valid regex");
+    let down = Regex::new(
+        r"(?i)^\s*--\s*(?:migrate:down|\+migrate\s+down|\+goose\s+down|down\s+migration)\b",
+    )
+    .expect("valid regex");
     let mut out = String::new();
     for l in text.lines() {
         if down.is_match(l) {
@@ -265,13 +273,17 @@ pub fn target_table(stmt: &str) -> Option<String> {
     let i = words.iter().position(|w| w.eq_ignore_ascii_case("table"))?;
     let mut j = i + 1;
     while words.get(j).is_some_and(|w| {
-        w.eq_ignore_ascii_case("if") || w.eq_ignore_ascii_case("not") || w.eq_ignore_ascii_case("exists") || w.eq_ignore_ascii_case("only")
+        w.eq_ignore_ascii_case("if")
+            || w.eq_ignore_ascii_case("not")
+            || w.eq_ignore_ascii_case("exists")
+            || w.eq_ignore_ascii_case("only")
     }) {
         j += 1;
     }
-    words
-        .get(j)
-        .map(|w| w.trim_matches(|c| c == '"' || c == '(').to_ascii_lowercase())
+    words.get(j).map(|w| {
+        w.trim_matches(|c| c == '"' || c == '(')
+            .to_ascii_lowercase()
+    })
 }
 
 /// For an `await` (or any node): whether it runs once per iteration of
@@ -297,7 +309,7 @@ pub fn per_loop_iteration(node: tree_sitter::Node) -> Option<bool> {
         {
             let for_await = p.kind() == "for_in_statement"
                 && (0..p.child_count())
-                    .filter_map(|i| p.child(i as u32))
+                    .filter_map(|i| p.child(i))
                     .any(|c| c.kind() == "await");
             if for_await || leaves_loop(node, body) {
                 return None;
@@ -318,14 +330,23 @@ mod tests {
     fn statements_keep_their_first_line_and_skip_dollar_bodies() {
         let sql = "-- c\nSELECT 1;\nCREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;\nALTER TABLE t\n  ADD COLUMN x int;\n";
         let st = statements(sql);
-        assert_eq!(st.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![2, 3, 4]);
+        assert_eq!(
+            st.iter().map(|(l, _)| *l).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
         assert!(st[1].1.contains("$$ SELECT 1; $$"));
     }
 
     #[test]
     fn the_forward_half_stops_at_a_down_marker() {
         let sql = "-- Up Migration\nALTER TABLE t ADD COLUMN x int;\n-- Down Migration\nALTER TABLE t DROP COLUMN x;\n";
-        assert_eq!(forward_half(sql), "-- Up Migration\nALTER TABLE t ADD COLUMN x int;\n");
-        assert_eq!(target_table("ALTER TABLE IF EXISTS \"Orders\" ADD x int"), Some("orders".into()));
+        assert_eq!(
+            forward_half(sql),
+            "-- Up Migration\nALTER TABLE t ADD COLUMN x int;\n"
+        );
+        assert_eq!(
+            target_table("ALTER TABLE IF EXISTS \"Orders\" ADD x int"),
+            Some("orders".into())
+        );
     }
 }

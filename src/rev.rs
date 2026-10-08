@@ -83,7 +83,10 @@ impl Rev {
             return hit.clone();
         }
         let text = std::fs::read_to_string(self.dir(root)?.join(rel)).ok();
-        cache.texts.borrow_mut().insert(rel.to_path_buf(), text.clone());
+        cache
+            .texts
+            .borrow_mut()
+            .insert(rel.to_path_buf(), text.clone());
         text
     }
 
@@ -109,7 +112,11 @@ impl Rev {
             let set = self.list_files(root).into_iter().collect();
             *cache.file_set.borrow_mut() = Some(set);
         }
-        cache.file_set.borrow().as_ref().is_some_and(|set| set.contains(rel))
+        cache
+            .file_set
+            .borrow()
+            .as_ref()
+            .is_some_and(|set| set.contains(rel))
     }
 
     /// Every file in the tree, repo-relative. Cached: the coarse layer
@@ -124,7 +131,10 @@ impl Rev {
         }
         let files = match self {
             Rev::Working(_) => git_listed(root).unwrap_or_else(|| walk_tree(root)),
-            Rev::Commit(c) => self.tree(c, root).map(|dir| walk_tree(&dir)).unwrap_or_default(),
+            Rev::Commit(c) => self
+                .tree(c, root)
+                .map(|dir| walk_tree(&dir))
+                .unwrap_or_default(),
         };
         *cache.files.borrow_mut() = Some(files.clone());
         files
@@ -146,7 +156,10 @@ impl Rev {
             .map(|all| all.iter().filter(|f| f.starts_with(dir)).cloned().collect())
             .unwrap_or_default();
         let files = std::rc::Rc::new(files);
-        cache.under.borrow_mut().insert(dir.to_path_buf(), files.clone());
+        cache
+            .under
+            .borrow_mut()
+            .insert(dir.to_path_buf(), files.clone());
         files
     }
 
@@ -171,7 +184,14 @@ impl Rev {
 fn git_listed(root: &Path) -> Option<Vec<PathBuf>> {
     let out = Command::new("git")
         .current_dir(root)
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--deduplicate"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--deduplicate",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())?;

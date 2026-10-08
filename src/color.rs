@@ -65,9 +65,11 @@ pub fn take_option(args: Vec<String>) -> Result<(Choice, Vec<String>), String> {
             choice = Choice::Never;
         } else if a == "--color" {
             let v = it.next().ok_or("--color needs auto, always or never")?;
-            choice = Choice::parse(&v).ok_or(format!("--color {v}: expected auto, always or never"))?;
+            choice =
+                Choice::parse(&v).ok_or(format!("--color {v}: expected auto, always or never"))?;
         } else if let Some(v) = a.strip_prefix("--color=") {
-            choice = Choice::parse(v).ok_or(format!("--color={v}: expected auto, always or never"))?;
+            choice =
+                Choice::parse(v).ok_or(format!("--color={v}: expected auto, always or never"))?;
         } else {
             rest.push(a);
         }

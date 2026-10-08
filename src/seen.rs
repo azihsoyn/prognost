@@ -66,8 +66,14 @@ impl SeenStore {
         if !self.loaded {
             self.loaded = true;
             let mut cmd = Command::new("git");
-            cmd.current_dir(&self.root)
-                .args(["diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3", &self.base]);
+            cmd.current_dir(&self.root).args([
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--find-renames",
+                "-U3",
+                &self.base,
+            ]);
             if let Some(head) = &self.head {
                 cmd.arg(head);
             }
@@ -98,7 +104,8 @@ impl SeenStore {
         let (s, t) = self
             .store
             .progress(path, hunks.iter().map(|h| (h.key.as_str(), h.changed)));
-        let pairs: Vec<(String, usize)> = hunks.iter().map(|h| (h.key.clone(), h.changed)).collect();
+        let pairs: Vec<(String, usize)> =
+            hunks.iter().map(|h| (h.key.clone(), h.changed)).collect();
         t > 0 && s == t && self.store.flag_count(path, &pairs) == 0
     }
 
@@ -129,7 +136,11 @@ pub fn hunk_keys(unified: &str) -> Vec<HunkKey> {
             let changed = lines.iter().filter(|(m, _)| *m != Mark::Context).count();
             let raw = diffseen::hunk_hash(lines.iter().map(|(m, t)| (*m, t.as_str())));
             let n = counts.entry(raw.clone()).or_insert(0);
-            let key = if *n == 0 { raw.clone() } else { format!("{raw}#{n}") };
+            let key = if *n == 0 {
+                raw.clone()
+            } else {
+                format!("{raw}#{n}")
+            };
             *n += 1;
             HunkKey { key, changed }
         })
@@ -141,7 +152,8 @@ pub fn hunk_keys(unified: &str) -> Vec<HunkKey> {
 fn split_files(unified: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut cur: Option<(Option<String>, Option<String>, String)> = None;
-    let finish = |cur: Option<(Option<String>, Option<String>, String)>, out: &mut Vec<(String, String)>| {
+    let finish = |cur: Option<(Option<String>, Option<String>, String)>,
+                  out: &mut Vec<(String, String)>| {
         if let Some((old, new, text)) = cur
             && let Some(path) = new.or(old)
         {
@@ -233,15 +245,16 @@ diff --git a/f.rs b/f.rs
 
     #[test]
     fn a_multi_file_diff_splits_per_file() {
-        let two = format!(
-            "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1 +1 @@\n-a\n+b\n\
-             diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
-        );
+        let two = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1 +1 @@\n-a\n+b\n\
+             diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n".to_string();
         let files = split_files(&two);
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].0, "f.rs");
         assert_eq!(files[1].0, "gone.rs");
-        assert_eq!(hunk_keys(&files[0].1), hunk_keys("@@ -1 +1 @@\n-a\n+b\n").iter().cloned().collect::<Vec<_>>());
+        assert_eq!(
+            hunk_keys(&files[0].1),
+            hunk_keys("@@ -1 +1 @@\n-a\n+b\n").to_vec()
+        );
     }
 
     #[test]

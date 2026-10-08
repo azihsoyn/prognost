@@ -60,21 +60,34 @@ pub fn extract_for_path(path: &std::path::Path, source: &str) -> anyhow::Result<
         Some("svelte") => {
             // `+page.svelte`, `+layout@.svelte` → `Page`, `Layout`: the
             // file header already says which route they belong to.
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Component");
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Component");
             let stem = stem.split('@').next().unwrap_or(stem);
             let name = match stem.strip_prefix('+') {
                 Some(kind) => {
                     let mut c = kind.chars();
-                    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+                    c.next()
+                        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                        .unwrap_or_default()
                 }
                 None => stem.to_string(),
             }
             .replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
-            let name = if name.is_empty() { "Component".to_string() } else { name };
+            let name = if name.is_empty() {
+                "Component".to_string()
+            } else {
+                name
+            };
             let fns = extract(&script_only(source, &name), false);
             if let (Ok(fns), Ok(log)) = (&fns, std::env::var("PROGNOST_DEBUG")) {
                 use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log)
+                {
                     for func in fns {
                         let _ = writeln!(
                             f,
@@ -114,12 +127,18 @@ pub fn script_only(source: &str, name: &str) -> String {
     let mut in_import = false;
     for line in source.lines() {
         let trimmed = line.trim_start();
-        let opens = trimmed.starts_with("<script") && trimmed.contains('>') && !trimmed.contains("</script>");
+        let opens = trimmed.starts_with("<script")
+            && trimmed.contains('>')
+            && !trimmed.contains("</script>");
         let closes = trimmed.starts_with("</script>");
         if opens {
             in_script = true;
             let is_module = trimmed.contains(" module") || trimmed.contains("context=\"module\"");
-            let fn_name = if is_module { format!("{name}_module") } else { name.to_string() };
+            let fn_name = if is_module {
+                format!("{name}_module")
+            } else {
+                name.to_string()
+            };
             out.push_str(&format!("export const {fn_name} = async () => {{\n"));
             continue;
         }
@@ -158,17 +177,29 @@ mod svelte_tests {
     fn a_component_is_one_function_with_its_callbacks_inside() {
         let src = "<div/>\n<script lang=\"ts\">\n  import { x } from './x.ts';\n  import {\n    a,\n    type B,\n  } from './ab.ts';\n  export let title: string;\n  let { rows } = $props();\n  const load = async () => {\n    await client.api.v1.tables.$get();\n  };\n  $effect(() => {\n    load();\n  });\n</script>\n<p>{x}</p>\n";
         let fns = extract_for_path(std::path::Path::new("a/Foo.svelte"), src).unwrap();
-        let comp = fns.iter().find(|f| f.name.as_deref() == Some("Foo")).expect("component fn");
+        let comp = fns
+            .iter()
+            .find(|f| f.name.as_deref() == Some("Foo"))
+            .expect("component fn");
         assert_eq!(comp.start_line, 2);
         assert_eq!(comp.end_line, 16);
         assert!(comp.exported);
-        let load = fns.iter().find(|f| f.name.as_deref() == Some("load")).unwrap();
+        let load = fns
+            .iter()
+            .find(|f| f.name.as_deref() == Some("load"))
+            .unwrap();
         assert_eq!(load.parent, Some(0));
         assert_eq!(load.start_line, 10);
         // The $effect callback is nested in the component, not a top-level function.
-        let effect = fns.iter().find(|f| f.start_line == 13).expect("effect callback");
+        let effect = fns
+            .iter()
+            .find(|f| f.start_line == 13)
+            .expect("effect callback");
         assert_eq!(effect.parent, Some(0));
-        assert!(fns.iter().all(|f| f.name.as_deref() == Some("Foo") || f.parent.is_some()));
+        assert!(
+            fns.iter()
+                .all(|f| f.name.as_deref() == Some("Foo") || f.parent.is_some())
+        );
     }
 }
 

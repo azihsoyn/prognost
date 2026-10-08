@@ -32,10 +32,8 @@ static NAMESPACE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("static regex")
 });
 static NAMED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"\bimport\s+(?:type\s+)?(?:(\w+)\s*,\s*)?\{([^}]*)\}\s*from\s*['"]([^'"\n]+)['"]"#,
-    )
-    .expect("static regex")
+    Regex::new(r#"\bimport\s+(?:type\s+)?(?:(\w+)\s*,\s*)?\{([^}]*)\}\s*from\s*['"]([^'"\n]+)['"]"#)
+        .expect("static regex")
 });
 static DEFAULT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\bimport\s+(?:type\s+)?(\w+)\s+from\s*['"]([^'"\n]+)['"]"#).expect("static regex")
@@ -126,11 +124,17 @@ pub fn package_name(specifier: &str) -> String {
         return specifier.to_string();
     }
     let take = if specifier.starts_with('@') { 2 } else { 1 };
-    specifier.split('/').take(take).collect::<Vec<_>>().join("/")
+    specifier
+        .split('/')
+        .take(take)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn is_ident(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
 #[cfg(test)]
@@ -154,20 +158,29 @@ import {
         assert_eq!(b["db"].specifier, "@shop/database");
         assert_eq!(b["equals"].binding, Binding::Named("eq".into()));
         assert_eq!(b["and"].specifier, "drizzle-orm");
-        assert_eq!(b["TypedResponse"].binding, Binding::Named("TypedResponse".into()));
+        assert_eq!(
+            b["TypedResponse"].binding,
+            Binding::Named("TypedResponse".into())
+        );
         assert_eq!(b["Hono"].binding, Binding::Default);
         assert_eq!(b["H"].binding, Binding::Named("Hono".into()));
-        assert_eq!(b["DeleteFolderDeleteParam"].specifier, "./OrderControllerData.ts");
+        assert_eq!(
+            b["DeleteFolderDeleteParam"].specifier,
+            "./OrderControllerData.ts"
+        );
         assert_eq!(b["FolderData"].binding, Binding::Named("FolderData".into()));
     }
 
     #[test]
     fn reads_namespace_reexports_and_package_names() {
-        let src = "export * as fooDomain from './domain/foo/FooDomain.ts';\nexport { x } from './x.ts';";
+        let src =
+            "export * as fooDomain from './domain/foo/FooDomain.ts';\nexport { x } from './x.ts';";
         let r = namespace_reexports(src);
         assert_eq!(r["fooDomain"], "./domain/foo/FooDomain.ts");
         assert_eq!(r.len(), 1);
-        let specs = reexport_specs("export * from './client.ts';\nexport { a, b as c } from './x.ts';\nexport * as ns from './ns.ts';");
+        let specs = reexport_specs(
+            "export * from './client.ts';\nexport { a, b as c } from './x.ts';\nexport * as ns from './ns.ts';",
+        );
         assert_eq!(specs, ["./client.ts", "./x.ts"]);
         assert_eq!(package_name("@shop/aws/kms"), "@shop/aws");
         assert_eq!(package_name("drizzle-orm"), "drizzle-orm");

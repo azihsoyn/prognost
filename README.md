@@ -138,6 +138,13 @@ the same diff always gives the same plan, and the same plan the same
 assessment. That is what makes the output something to diff, cache, gate a
 merge on, or hand to an agent as ground truth.
 
+## Inside herdr
+
+In a [herdr](https://herdr.dev) pane, `prognost graph` run by a coding agent
+or a script — anything without a terminal — opens in a pane beside the
+caller, and `o` opens the selected function in your editor in another pane
+while the graph stays up. See [docs/graph.md](docs/graph.md#inside-herdr).
+
 ## Commands
 
 ```sh
@@ -146,13 +153,20 @@ prognost serve [host:port]           # the web page over HTTP, synced with GitHu
 prognost plan [--json]               # what changes and how far it reaches
 prognost assess [<plan.json> | -]    # the plan's risks, by rules; --sarif, --fail-on
 prognost rules                       # the rules in force here
-prognost <file>[:<symbol>]           # one file: its functions aligned across the revisions
+prognost align <file>[:<symbol>]     # one file: its functions aligned across the revisions
 ```
 
 Output is coloured on a terminal and plain when piped. `--color
 auto|always|never` (or `--no-color`) chooses explicitly; `NO_COLOR` and
-`CLICOLOR_FORCE` are honoured. With colour off, the graph marks changes by
-underline and the selection by reverse video.
+`CLICOLOR_FORCE` are honoured.
+
+## Documentation
+
+- [docs/graph.md](docs/graph.md) — the graph's keys, the web page, `serve`, herdr
+- [docs/plan.md](docs/plan.md) — `plan` and `assess`, and the JSON they print
+- [docs/rules.md](docs/rules.md) — writing and choosing risk rules
+- [docs/config.md](docs/config.md) — `prognost.toml`, seams, environment, what is analysed
+- [docs/ci.md](docs/ci.md) — running it on pull requests
 
 ## License
 

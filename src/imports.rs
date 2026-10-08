@@ -41,7 +41,9 @@ pub fn scan(source: &str) -> Vec<String> {
         .collect()
 }
 
-pub const RESOLVABLE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "svelte"];
+pub const RESOLVABLE_EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "svelte",
+];
 
 #[cfg(test)]
 mod tests {

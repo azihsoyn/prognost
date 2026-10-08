@@ -981,7 +981,6 @@ dependencies = [
  "diffseen",
  "glob",
  "ratatui",
- "ratatui-dnd",
  "regex",
  "schemars",
  "serde",
@@ -1078,15 +1077,6 @@ dependencies = [
  "crossterm",
  "instability",
  "ratatui-core",
-]
-
-[[package]]
-name = "ratatui-dnd"
-version = "0.1.0"
-source = "git+https://github.com/azihsoyn/ratatui-dnd#34998453952efd1745d3d49db6d213d914b9a100"
-dependencies = [
- "crossterm",
- "ratatui",
 ]
 
 [[package]]

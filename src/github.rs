@@ -24,14 +24,28 @@ fn gh(root: &Path, args: &[&str]) -> Result<String> {
         .output()
         .context("cannot run gh — is it installed?")?;
     if !out.status.success() {
-        bail!("gh {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "gh {}: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The open pull request whose head is `sha` (or `--pr N` when given).
 pub fn find_pr(root: &Path, head_sha: Option<&str>, number: Option<u64>) -> Result<PullRequest> {
-    let repo = gh(root, &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])?;
+    let repo = gh(
+        root,
+        &[
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ],
+    )?;
     let (owner, name) = repo
         .trim()
         .split_once('/')
@@ -136,5 +150,9 @@ pub fn viewed_files(root: &Path, pr: &PullRequest) -> Result<Vec<String>> {
             ".data.repository.pullRequest.files.nodes[] | select(.viewerViewedState==\"VIEWED\") | .path",
         ],
     )?;
-    Ok(out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }

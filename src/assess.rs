@@ -65,7 +65,10 @@ pub fn assess(root: &Path, plan: &PlanReport, sarif: &[PathBuf]) -> Result<Asses
             continue;
         };
         let before = base
-            .read(root, Path::new(f.previous_path.as_deref().unwrap_or(&f.path)))
+            .read(
+                root,
+                Path::new(f.previous_path.as_deref().unwrap_or(&f.path)),
+            )
             .unwrap_or_default();
         files.push(ChangedFile {
             added: risk::added_lines(&before, &text),
@@ -75,9 +78,17 @@ pub fn assess(root: &Path, plan: &PlanReport, sarif: &[PathBuf]) -> Result<Asses
     }
 
     // The changed functions with the facts the plan recorded about them.
-    let summary_of: std::collections::HashMap<&str, &SymbolSummary> =
-        plan.summary.symbols.iter().map(|s| (s.id.as_str(), s)).collect();
-    let changed: Vec<&Function> = plan.functions.iter().filter(|f| f.change != Change::Unchanged).collect();
+    let summary_of: std::collections::HashMap<&str, &SymbolSummary> = plan
+        .summary
+        .symbols
+        .iter()
+        .map(|s| (s.id.as_str(), s))
+        .collect();
+    let changed: Vec<&Function> = plan
+        .functions
+        .iter()
+        .filter(|f| f.change != Change::Unchanged)
+        .collect();
     let symbols: Vec<SymbolFacts> = changed
         .iter()
         .map(|f| {
@@ -93,7 +104,9 @@ pub fn assess(root: &Path, plan: &PlanReport, sarif: &[PathBuf]) -> Result<Asses
                     .unwrap_or_default(),
                 exported: f.exported,
                 route: f.route.clone(),
-                importing_packages: s.map(|s| s.called_from_packages.clone()).unwrap_or_default(),
+                importing_packages: s
+                    .map(|s| s.called_from_packages.clone())
+                    .unwrap_or_default(),
                 reach_functions: s.map_or(0, |s| s.reach_functions),
                 reach_files: s.map_or(0, |s| s.reach_files),
                 reach_packages: s.map_or(0, |s| s.reach_packages),
@@ -126,7 +139,12 @@ pub fn assess(root: &Path, plan: &PlanReport, sarif: &[PathBuf]) -> Result<Asses
     let owner = |path: &str, line: u32| -> Option<(String, String)> {
         changed
             .iter()
-            .filter(|f| f.path == path && f.side == Side::Head && f.range.start <= line && line <= f.range.end)
+            .filter(|f| {
+                f.path == path
+                    && f.side == Side::Head
+                    && f.range.start <= line
+                    && line <= f.range.end
+            })
             .min_by_key(|f| f.range.end - f.range.start)
             .map(|f| (f.id.clone(), f.name.clone()))
     };
@@ -141,10 +159,13 @@ pub fn assess(root: &Path, plan: &PlanReport, sarif: &[PathBuf]) -> Result<Asses
     for log in sarif {
         let text = std::fs::read_to_string(log).with_context(|| log.display().to_string())?;
         findings.extend(
-            crate::rules::sarif_findings(&text, root, &files).with_context(|| log.display().to_string())?,
+            crate::rules::sarif_findings(&text, root, &files)
+                .with_context(|| log.display().to_string())?,
         );
     }
-    findings.sort_by(|a, b| (a.severity, &a.rule, &a.path, a.line).cmp(&(b.severity, &b.rule, &b.path, b.line)));
+    findings.sort_by(|a, b| {
+        (a.severity, &a.rule, &a.path, a.line).cmp(&(b.severity, &b.rule, &b.path, b.line))
+    });
 
     let mut counts = Counts::default();
     for f in &findings {
@@ -166,7 +187,11 @@ pub fn assess(root: &Path, plan: &PlanReport, sarif: &[PathBuf]) -> Result<Asses
 /// Spec/test files carry assertions about a change, not the change.
 fn is_test_file(p: &Path) -> bool {
     let s = p.to_string_lossy();
-    s.contains(".spec.") || s.contains(".test.") || s.contains("/tests/") || s.contains("/test/") || s.contains("/__tests__/")
+    s.contains(".spec.")
+        || s.contains(".test.")
+        || s.contains("/tests/")
+        || s.contains("/test/")
+        || s.contains("/__tests__/")
 }
 
 impl Assessment {
@@ -183,7 +208,13 @@ impl Assessment {
             "{}  {} → {}\n\n",
             c::bold("prognost assess"),
             c::dim(&short(&self.base)),
-            c::dim(&self.head.as_deref().map(short).unwrap_or_else(|| "working tree".into()))
+            c::dim(
+                &self
+                    .head
+                    .as_deref()
+                    .map(short)
+                    .unwrap_or_else(|| "working tree".into())
+            )
         ));
         if self.findings.is_empty() {
             out.push_str(&c::green("No rule matched.\n"));
@@ -202,7 +233,11 @@ impl Assessment {
                 r.title
             ));
             let excerpt: String = r.excerpt.chars().take(90).collect();
-            let more = if r.excerpt.chars().count() > 90 { "…" } else { "" };
+            let more = if r.excerpt.chars().count() > 90 {
+                "…"
+            } else {
+                ""
+            };
             out.push_str(&format!(
                 "             {}  {}\n",
                 c::cyan(&format!("{}:{}", r.path, r.line)),
@@ -233,7 +268,12 @@ mod tests {
     #[test]
     fn a_plan_round_trips_and_an_old_one_is_refused() {
         let plan: PlanReport = serde_json::from_str(&plan_json(crate::plan::PLAN_VERSION)).unwrap();
-        assert_eq!(serde_json::from_str::<PlanReport>(&serde_json::to_string(&plan).unwrap()).unwrap().base, "abc");
+        assert_eq!(
+            serde_json::from_str::<PlanReport>(&serde_json::to_string(&plan).unwrap())
+                .unwrap()
+                .base,
+            "abc"
+        );
         let old: PlanReport = serde_json::from_str(&plan_json(1)).unwrap();
         let err = assess(Path::new("."), &old, &[]).unwrap_err().to_string();
         assert!(err.contains("rerun prognost plan"), "{err}");

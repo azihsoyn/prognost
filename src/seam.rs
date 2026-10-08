@@ -209,7 +209,10 @@ mod tests {
 
     #[test]
     fn keys_compare_as_paths_with_params() {
-        assert!(same_key("GET /api/v1/orders/:orderId", "GET /api/v1/orders/:id"));
+        assert!(same_key(
+            "GET /api/v1/orders/:orderId",
+            "GET /api/v1/orders/:id"
+        ));
         assert!(same_key("/x/{id}", "/x/[slug]"));
         assert!(!same_key("/x/a", "/x/a/b"));
         assert!(!same_key("order.created", "order.deleted"));

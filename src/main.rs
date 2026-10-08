@@ -1,52 +1,51 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use prognost::api::{self, Request};
-use prognost::origin::{self, Scope};
+use prognost::api;
+use prognost::origin;
 use prognost::report::{self, Kind, Row};
 use prognost::rev::Rev;
-use prognost::{align, flow_tui, graph, html, repo, ts_extract, tui, workspace};
+use prognost::{align, flow_tui, html, repo, ts_extract, workspace};
 
 const USAGE: &str = "\
-prognost — a prognosis for a code change: what it touches, how far it reaches, what looks risky
+Usage: prognost <command> [options]
 
-The diff is always taken from the merge base of --base (default: origin's
-default branch) and --head (default: the working tree), like
-`git diff base...head`.
+Every command diffs from the merge base of --base (default: origin's default
+branch) and --head (default: the working tree), like `git diff base...head`.
 
-  prognost graph [--base <rev>] [--head <rev>]
-                                         every function the diff changed, its callers and callees, as a graph
-                                         in the terminal (pan, zoom, expand, open a diff, mark files seen)
-  prognost graph … --html <file>         the same graph as a self-contained web page (click lights call chains)
-  prognost graph … --lod <pkg>=<n>       start a package at detail level n (0 functions … 3 one node)
-  prognost serve [host:port] [--base <rev>] [--head <rev>] [--pr <number>]
-                                         the web page over HTTP (default 127.0.0.1:7357), with seen marks and
-                                         GitHub Viewed sync (--pr: default the open PR containing the head)
-  prognost plan [--base <rev>] [--head <rev>] [--json] [--hops N]
-                                         what the diff changes and how far it reaches, before it ships: the
-                                         changed functions, their callers up to the entry points, the files
-                                         (schema: the plan key of `prognost --schema`)
-  prognost assess [<plan.json> | -] [--sarif <file>] [--json] [--fail-on high|medium|low]
-                                         assess a plan's risks with the rules in force; reads `prognost plan --json`
-                                         (stdin by default): `prognost plan --json | prognost assess -`;
-                                         --sarif adds an analyser's results on added lines;
-                                         --fail-on exits 1 when a finding is at least that severe
-  prognost rules [--json]                the rules in force: presets plus the repository's prognost.toml
+Commands:
+  graph   [--base <rev>] [--head <rev>] [--lod <pkg>=<n>] [--hops N]
+          the changed functions, their callers and callees, as a graph you walk in
+          the terminal. Run without a terminal (by an agent, a script) inside herdr,
+          it opens in a pane beside the caller; --pane asks for that explicitly.
+          --html <file>   the same graph as a self-contained web page
+          --dump <file>   the same graph as text
+  serve   [host:port] [--base <rev>] [--head <rev>] [--pr <number>]
+          the web page over HTTP (default 127.0.0.1:7357), with seen marks kept in
+          sync with GitHub's Viewed checkboxes (needs `gh`)
+  plan    [--base <rev>] [--head <rev>] [--json] [--hops N]
+          what the diff changes and how far it reaches: the changed functions, their
+          callers up to the entry points, the files
+  assess  [<plan.json> | -] [--sarif <file>] [--json] [--fail-on high|medium|low]
+          a plan's risks by the rules in force: `prognost plan --json | prognost assess -`.
+          --sarif adds another analyser's results on added lines; --fail-on exits 1
+          when a finding is at least that severe
+  rules   [--json]
+          the rules in force: presets plus the repository's prognost.toml
+  align   <file>[:<symbol>] [--base <rev>] [--head <rev>] [--text]
+          one file: its functions aligned across the two revisions
 
-  prognost <file[:symbol]> [--base <rev>] [--head <rev>] [--text]
-                                         one file: align its functions across the two revisions (TUI, or text)
-  prognost map                           the older file-level dependency map (see `prognost map --help`)
-  prognost --api '<JSON>' | --schema     one request in an envelope / the JSON schemas
-
+Options for every command:
   --color <auto|always|never>, --no-color
-                                         colour in any command's output (default auto: on for a terminal; off when
-                                         piped, or when NO_COLOR is set; CLICOLOR_FORCE=1 forces it on)
+          colour (default auto: on for a terminal; off when piped or NO_COLOR is set;
+          CLICOLOR_FORCE=1 forces it on)
+  --schema    the JSON Schema of plan, assess and impact output
+  -V, --version
+  -h, --help
 
-  Earlier spellings still work: `prognost --base <rev>` (= graph), `--dump <file>` (the graph as text),
-  `--serve`, and `--impact [--json] [--hops N]` (superseded by plan).
-
-In the one-file TUI: j/k move, tab jumps to the next change, a shows/hides
-what didn't change, enter opens the selected node in hide, q quits.
+In the graph: arrows or hjkl move (← callers, → callees), Enter shows the diff,
+o opens the file in $VISUAL/$EDITOR (in a pane beside it inside herdr), z/Z fold a
+package, v marks a file seen, q quits.
 ";
 
 fn out(body: &str) {
@@ -63,30 +62,25 @@ fn main() -> Result<()> {
     let first = args.first().map(String::as_str).unwrap_or("");
 
     match first {
-        "-h" | "--help" => {
+        "" | "-h" | "--help" | "help" => {
             print!("\n{}\n{USAGE}", prognost::color::logo());
-            return Ok(());
+            Ok(())
+        }
+        "-V" | "--version" => {
+            println!("prognost {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
         }
         "--schema" => {
             out(&serde_json::to_string_pretty(&api::schema_document())?);
-            return Ok(());
+            Ok(())
         }
-        "--api" => {
-            let req: Request = serde_json::from_str(args.get(1).map(String::as_str).unwrap_or(""))?;
-            let id = api::request_id(&req);
-            let res = api::dispatch(req);
-            out(&serde_json::to_string(&api::Envelope::wrap(id, res))?);
-            return Ok(());
-        }
-        "map" => return run_map(&args[1..]),
-        "plan" => return run_compare(&args[1..], Some(Stage::Plan)),
-        "graph" => return run_compare(&args[1..], Some(Stage::Graph)),
+        "graph" => run_graph(&args[1..]),
         "serve" => {
             // `serve [host:port] …`: the address, if any, comes first.
             let mut rest: Vec<String> = Vec::new();
             let mut addr = "127.0.0.1:7357".to_string();
             for (i, a) in args[1..].iter().enumerate() {
-                if i == 0 && !a.starts_with("--") {
+                if i == 0 && !a.starts_with('-') {
                     addr = a.clone();
                 } else {
                     rest.push(a.clone());
@@ -94,14 +88,50 @@ fn main() -> Result<()> {
             }
             rest.push("--serve".into());
             rest.push(addr);
-            return run_compare(&rest, Some(Stage::Graph));
+            run_compare(&rest, Stage::Serve)
         }
-        "assess" => return run_assess(&args[1..]),
-        "rules" => return run_rules(&args[1..]),
-        _ => {}
+        "plan" => run_compare(&args[1..], Stage::Plan),
+        "assess" => run_assess(&args[1..]),
+        "rules" => run_rules(&args[1..]),
+        "align" => run_compare(&args[1..], Stage::Align),
+        // Kept for a tool that still reads its JSON; `plan --json` supersedes it.
+        _ if args.iter().any(|a| a == "--impact") => run_compare(&args, Stage::Impact),
+        other => bail!("unknown command {other:?} — see `prognost --help`"),
     }
+}
 
-    run_compare(&args, None)
+/// `graph`. With no terminal to draw on — run by an agent or a script —
+/// inside herdr it opens in a pane beside the caller (as `--pane` asks
+/// for explicitly); outside herdr it says why it can't.
+fn run_graph(args: &[String]) -> Result<()> {
+    use std::io::IsTerminal;
+    let writes_file = args.iter().any(|a| a == "--html" || a == "--dump");
+    let asked = args.iter().any(|a| a == "--pane");
+    let rest: Vec<String> = args.iter().filter(|a| *a != "--pane").cloned().collect();
+    let has_terminal = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
+    if !writes_file && (asked || !has_terminal) {
+        if prognost::herdr::inside() {
+            let root = repo::root()?;
+            let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+            let mut line = vec![exe, "graph".to_string()];
+            line.extend(rest);
+            let pane = prognost::herdr::open_beside(
+                &root,
+                &prognost::herdr::shell_line(&line),
+                "prognost graph",
+                asked,
+            )?;
+            println!("prognost graph opened in herdr pane {pane}");
+            return Ok(());
+        }
+        if asked {
+            bail!("--pane needs herdr: run prognost graph inside a herdr pane");
+        }
+        bail!(
+            "prognost graph draws in a terminal; run it in one (inside herdr it opens a pane by itself), or use --html <file>"
+        );
+    }
+    run_compare(&rest, Stage::Graph)
 }
 
 /// `prognost rules [--json]`: the rules in force here — presets plus the
@@ -122,10 +152,17 @@ fn run_rules(args: &[String]) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&rules)?);
         return Ok(());
     }
-    println!("{} {}", prognost::color::bold("config:"), prognost::seam::config_path(&root).display());
+    println!(
+        "{} {}",
+        prognost::color::bold("config:"),
+        prognost::seam::config_path(&root).display()
+    );
     for r in &set.rules {
         let c = &r.config;
-        let kind = serde_json::to_value(c.kind).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let kind = serde_json::to_value(c.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
         let when = match c.kind {
             prognost::rules::Kind::Symbol => c.conditions.join(" && "),
             prognost::rules::Kind::Ast => c.query.clone().unwrap_or_default(),
@@ -150,11 +187,15 @@ fn run_rules(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Which subcommand is running (`None`: the earlier flag-only spellings).
+/// Which subcommand is running.
 enum Stage {
-    Plan,
-    /// `graph` and `serve`: the whole diff as a graph.
     Graph,
+    Serve,
+    Plan,
+    /// One file's functions aligned.
+    Align,
+    /// The older `--impact` report.
+    Impact,
 }
 
 struct AssessOptions {
@@ -167,16 +208,24 @@ struct AssessOptions {
 
 /// `--sarif` and `--fail-on` out of `args`; the rest returned.
 fn split_assess_options(args: &[String]) -> Result<(AssessOptions, Vec<String>)> {
-    let mut opts = AssessOptions { sarif: Vec::new(), fail_on: None, json: false, plan: None };
+    let mut opts = AssessOptions {
+        sarif: Vec::new(),
+        fail_on: None,
+        json: false,
+        plan: None,
+    };
     let mut rest = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--sarif" => opts
-                .sarif
-                .push(PathBuf::from(it.next().ok_or_else(|| anyhow::anyhow!("--sarif needs a file"))?)),
+            "--sarif" => opts.sarif.push(PathBuf::from(
+                it.next()
+                    .ok_or_else(|| anyhow::anyhow!("--sarif needs a file"))?,
+            )),
             "--fail-on" => {
-                let v = it.next().ok_or_else(|| anyhow::anyhow!("--fail-on needs high, medium or low"))?;
+                let v = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--fail-on needs high, medium or low"))?;
                 opts.fail_on = Some(match v.as_str() {
                     "high" => prognost::risk::Severity::High,
                     "medium" => prognost::risk::Severity::Medium,
@@ -233,7 +282,7 @@ fn run_assess(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn run_compare(args: &[String], plan: Option<Stage>) -> Result<()> {
+fn run_compare(args: &[String], stage: Stage) -> Result<()> {
     let (file_symbol, base, head, as_text, dump, lods, impact, json, hops, html, serve, pr) =
         parse_compare_args(args)?;
 
@@ -249,19 +298,24 @@ fn run_compare(args: &[String], plan: Option<Stage>) -> Result<()> {
 
     // No file: the whole diff is the entrypoint — every changed
     // function, across every changed file, as one graph.
-    if let (Some(Stage::Graph | Stage::Plan), Some(f)) = (&plan, &file_symbol) {
-        bail!("{f}: graph, serve and plan take the whole diff, not a file; for one file use `prognost {f}`");
+    match (&stage, &file_symbol) {
+        (Stage::Align, None) => bail!("align needs a file: prognost align <file>[:<symbol>]"),
+        (Stage::Align, Some(_)) => {}
+        (_, Some(f)) => bail!(
+            "{f}: this command takes the whole diff, not a file; for one file use `prognost align {f}`"
+        ),
+        _ => {}
+    }
+    if as_text && !matches!(stage, Stage::Align) {
+        bail!("--text is for align; for the whole diff use plan, or graph --dump <file>");
     }
     let Some(file_symbol) = file_symbol else {
-        if as_text {
-            bail!("--text needs a file; the whole-diff view is TUI only");
-        }
-        if let Some(stage @ Stage::Plan) = &plan {
+        if let Stage::Plan = &stage {
             let base_ws = workspace::discover(&root, &base_rev)?;
             let head_ws = workspace::discover(&root, &head_rev)?;
-            let mut app = flow_tui::App::from_changes(root.clone(), base_rev, head_rev, base_ws, head_ws)?;
+            let mut app =
+                flow_tui::App::from_changes(root.clone(), base_rev, head_rev, base_ws, head_ws)?;
             let report = app.plan_report(hops)?;
-            let _ = stage;
             if json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -271,60 +325,63 @@ fn run_compare(args: &[String], plan: Option<Stage>) -> Result<()> {
         }
         let base_ws = workspace::discover(&root, &base_rev)?;
         let head_ws = workspace::discover(&root, &head_rev)?;
-        let mut app = match flow_tui::App::from_changes(root.clone(), base_rev, head_rev, base_ws, head_ws) {
-            Ok(app) => app,
-            // A diff with no function-level change (constants, config,
-            // markup): --impact still names the packages it touched.
-            Err(e) if impact && e.to_string().starts_with("no changed functions") => {
-                let base_rev = Rev::commit(base_sha.clone());
-                let head_rev = match &head {
-                    Some(h) => Rev::commit(h.clone()),
-                    None => Rev::working(),
-                };
-                let ws = workspace::discover(&root, &head_rev)?;
-                let files = origin::changed_files_between(&root, &base_rev, &head_rev)?;
-                let mut by_pkg: std::collections::BTreeMap<String, usize> = Default::default();
-                for f in &files {
-                    let pkg = ws
-                        .owning_package(f)
-                        .and_then(|p| p.name.clone())
-                        .unwrap_or_else(|| "(outside any package)".to_string());
-                    *by_pkg.entry(pkg).or_default() += 1;
-                }
-                if json {
-                    let report = prognost::impact::ImpactReport {
-                        version: prognost::impact::IMPACT_VERSION,
-                        base: base_sha.clone(),
-                        head: head.clone(),
-                        changed: Vec::new(),
-                        chains: Vec::new(),
-                        packages: prognost::impact::Packages {
-                            changed: by_pkg
-                                .iter()
-                                .map(|(p, n)| prognost::impact::PackageChange {
-                                    package: p.clone(),
-                                    files: *n,
-                                    functions: 0,
-                                })
-                                .collect(),
-                            affected: Vec::new(),
-                            crossings: Vec::new(),
-                        },
-                        truncated: false,
-                        limits: prognost::impact::Limits { hops, nodes: 0 },
+        let mut app =
+            match flow_tui::App::from_changes(root.clone(), base_rev, head_rev, base_ws, head_ws) {
+                Ok(app) => app,
+                // A diff with no function-level change (constants, config,
+                // markup): --impact still names the packages it touched.
+                Err(e) if impact && e.to_string().starts_with("no changed functions") => {
+                    let base_rev = Rev::commit(base_sha.clone());
+                    let head_rev = match &head {
+                        Some(h) => Rev::commit(h.clone()),
+                        None => Rev::working(),
                     };
-                    println!("{}", serde_json::to_string(&report)?);
-                } else {
-                    println!("changed (no function-level changes — data, config or markup only):");
-                    for (p, n) in &by_pkg {
-                        println!("  {p:<32} {n} file{}", if *n == 1 { "" } else { "s" });
+                    let ws = workspace::discover(&root, &head_rev)?;
+                    let files = origin::changed_files_between(&root, &base_rev, &head_rev)?;
+                    let mut by_pkg: std::collections::BTreeMap<String, usize> = Default::default();
+                    for f in &files {
+                        let pkg = ws
+                            .owning_package(f)
+                            .and_then(|p| p.name.clone())
+                            .unwrap_or_else(|| "(outside any package)".to_string());
+                        *by_pkg.entry(pkg).or_default() += 1;
                     }
-                    println!("affected upstream: not derivable without a changed function");
+                    if json {
+                        let report = prognost::impact::ImpactReport {
+                            version: prognost::impact::IMPACT_VERSION,
+                            base: base_sha.clone(),
+                            head: head.clone(),
+                            changed: Vec::new(),
+                            chains: Vec::new(),
+                            packages: prognost::impact::Packages {
+                                changed: by_pkg
+                                    .iter()
+                                    .map(|(p, n)| prognost::impact::PackageChange {
+                                        package: p.clone(),
+                                        files: *n,
+                                        functions: 0,
+                                    })
+                                    .collect(),
+                                affected: Vec::new(),
+                                crossings: Vec::new(),
+                            },
+                            truncated: false,
+                            limits: prognost::impact::Limits { hops, nodes: 0 },
+                        };
+                        println!("{}", serde_json::to_string(&report)?);
+                    } else {
+                        println!(
+                            "changed (no function-level changes — data, config or markup only):"
+                        );
+                        for (p, n) in &by_pkg {
+                            println!("  {p:<32} {n} file{}", if *n == 1 { "" } else { "s" });
+                        }
+                        println!("affected upstream: not derivable without a changed function");
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
+                Err(e) => return Err(e),
+            };
         for (pkg, level) in &lods {
             app.set_lod(pkg, *level);
         }
@@ -431,8 +488,16 @@ fn print_report(
         .unwrap_or_else(|| file.display().to_string());
     use prognost::color as col;
     out(&format!("{} {entry}", col::bold("flow:")));
-    out(&format!("{} {}", col::bold("base:"), col::dim(&base_rev.label())));
-    out(&format!("{} {}", col::bold("head:"), col::dim(&head_rev.label())));
+    out(&format!(
+        "{} {}",
+        col::bold("base:"),
+        col::dim(&base_rev.label())
+    ));
+    out(&format!(
+        "{} {}",
+        col::bold("head:"),
+        col::dim(&head_rev.label())
+    ));
     out("");
     out(&format!(
         "{} changed, {} unchanged (collapsed)",
@@ -460,11 +525,20 @@ fn print_row(row: &Row) {
         (None, Some(h)) => format!("  head:{}-{}", h.0, h.1),
         (None, None) => String::new(),
     };
-    out(&format!("{indent}{marker}{}{exported}{}", col::bold(&row.label), col::dim(&range)));
+    out(&format!(
+        "{indent}{marker}{}{exported}{}",
+        col::bold(&row.label),
+        col::dim(&range)
+    ));
     for change in &row.details {
         match change {
-            align::CallChange::Added(c) => out(&format!("{indent}    {}{c}", col::green("+ call added:   "))),
-            align::CallChange::Removed(c) => out(&format!("{indent}    {}{c}", col::red("- call removed: "))),
+            align::CallChange::Added(c) => out(&format!(
+                "{indent}    {}{c}",
+                col::green("+ call added:   ")
+            )),
+            align::CallChange::Removed(c) => {
+                out(&format!("{indent}    {}{c}", col::red("- call removed: ")))
+            }
         }
     }
 }
@@ -476,8 +550,10 @@ fn serve_page(mut app: flow_tui::App, addr: &str) -> Result<()> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| anyhow::anyhow!("cannot listen on {addr}: {e}"))?;
     println!("serving on http://{addr}/  (ctrl-c to stop)");
-    let json_header = tiny_http::Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap();
-    let html_header = tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap();
+    let json_header =
+        tiny_http::Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap();
+    let html_header =
+        tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap();
     for mut req in server.incoming_requests() {
         let url = req.url().to_string();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
@@ -487,11 +563,13 @@ fn serve_page(mut app: flow_tui::App, addr: &str) -> Result<()> {
                 (k == key).then(|| percent_decode(v))
             })
         };
-        let json = |body: String| tiny_http::Response::from_string(body).with_header(json_header.clone());
+        let json =
+            |body: String| tiny_http::Response::from_string(body).with_header(json_header.clone());
         let _ = std::io::Read::read_to_end(&mut req.as_reader(), &mut Vec::new());
         let response = match (req.method().as_str(), path) {
             ("GET", "/") | ("GET", "/index.html") => {
-                tiny_http::Response::from_string(app.render_html(true)).with_header(html_header.clone())
+                tiny_http::Response::from_string(app.render_html(true))
+                    .with_header(html_header.clone())
             }
             ("GET", "/api/seen") => json(app.seen_json()),
             ("POST", "/api/seen/toggle") => {
@@ -521,18 +599,16 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(b'%');
-                        i += 1;
-                    }
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(b) => {
+                    out.push(b);
+                    i += 3;
                 }
-            }
+                Err(_) => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
             b'+' => {
                 out.push(b' ');
                 i += 1;
@@ -624,8 +700,13 @@ fn parse_compare_args(args: &[String]) -> Result<CompareArgs> {
             }
             "--serve" => {
                 // An address is optional: `--serve` alone picks one.
-                let next = args.get(i + 1).filter(|a| !a.starts_with("--") && a.contains(':'));
-                serve = Some(next.cloned().unwrap_or_else(|| "127.0.0.1:7357".to_string()));
+                let next = args
+                    .get(i + 1)
+                    .filter(|a| !a.starts_with("--") && a.contains(':'));
+                serve = Some(
+                    next.cloned()
+                        .unwrap_or_else(|| "127.0.0.1:7357".to_string()),
+                );
                 i += if next.is_some() { 2 } else { 1 };
             }
             "--pr" => {
@@ -658,54 +739,18 @@ fn parse_compare_args(args: &[String]) -> Result<CompareArgs> {
             }
         }
     }
-    Ok((file_symbol, base, head, as_text, dump, lods, impact, json, hops, html, serve, pr))
-}
-
-fn run_map(args: &[String]) -> Result<()> {
-    let (scope, path) = parse_launch_args(args)?;
-    let root = repo::root()?;
-    let ws = workspace::discover(&root, &Rev::working())?;
-    let files = match path {
-        Some(p) => vec![origin::parse_file_arg(&p).0],
-        None => origin::changed_files(&root, scope.unwrap_or_default())?,
-    };
-    if files.is_empty() {
-        bail!("nothing changed under this scope — try --scope branch, or pass a file");
-    }
-    let starting_graph = graph::origin(&root, &files, &ws);
-
-    let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
-    let app = tui::App::new(root, ws, starting_graph);
-    let result = app.run(&mut terminal);
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
-    ratatui::restore();
-    result
-}
-
-fn parse_launch_args(args: &[String]) -> Result<(Option<Scope>, Option<String>)> {
-    let mut scope = None;
-    let mut path = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--scope" => {
-                let s = args
-                    .get(i + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--scope needs a value"))?;
-                scope = Some(match s.as_str() {
-                    "uncommitted" => Scope::Uncommitted,
-                    "staged" => Scope::Staged,
-                    "branch" => Scope::Branch,
-                    other => bail!("unknown scope: {other} (uncommitted, staged, branch)"),
-                });
-                i += 2;
-            }
-            other => {
-                path = Some(other.to_string());
-                i += 1;
-            }
-        }
-    }
-    Ok((scope, path))
+    Ok((
+        file_symbol,
+        base,
+        head,
+        as_text,
+        dump,
+        lods,
+        impact,
+        json,
+        hops,
+        html,
+        serve,
+        pr,
+    ))
 }

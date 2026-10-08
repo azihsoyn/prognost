@@ -207,9 +207,13 @@ impl Rule {
         let n = config.name.clone();
         let opt = |r: &Option<String>, f: &str| r.as_deref().map(|r| compile(r, &n, f)).transpose();
         match config.kind {
-            Kind::Line | Kind::Sql if config.pattern.is_none() => bail!("rule {n}: a {:?} rule needs a pattern", config.kind),
+            Kind::Line | Kind::Sql if config.pattern.is_none() => {
+                bail!("rule {n}: a {:?} rule needs a pattern", config.kind)
+            }
             Kind::Ast if config.query.is_none() => bail!("rule {n}: an ast rule needs a query"),
-            Kind::Symbol if config.conditions.is_empty() => bail!("rule {n}: a symbol rule needs `where`"),
+            Kind::Symbol if config.conditions.is_empty() => {
+                bail!("rule {n}: a symbol rule needs `where`")
+            }
             _ => {}
         }
         for f in &config.filters {
@@ -290,7 +294,11 @@ impl RuleSet {
             let Some((_, text)) = PRESETS.iter().find(|(n, _)| n == name) else {
                 bail!(
                     "{source}: unknown preset {name:?} (known: {})",
-                    PRESETS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                    PRESETS
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             };
             let preset: FileConfig =
@@ -316,7 +324,11 @@ impl RuleSet {
             if let Some(s) = &r.config.in_set
                 && !sets.iter().any(|x| x.config.name == s.set)
             {
-                bail!("rule {}: in_set names an unknown set {:?}", r.config.name, s.set);
+                bail!(
+                    "rule {}: in_set names an unknown set {:?}",
+                    r.config.name,
+                    s.set
+                );
             }
         }
         Ok(RuleSet { rules, sets })
@@ -331,7 +343,8 @@ impl RuleSet {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        RuleSet::from_config_text(text.as_deref(), &label).with_context(|| path.display().to_string())
+        RuleSet::from_config_text(text.as_deref(), &label)
+            .with_context(|| path.display().to_string())
     }
 }
 
@@ -419,11 +432,18 @@ impl SymbolFacts {
             ("name".into(), self.name.clone()),
             ("route".into(), self.route.clone().unwrap_or_default()),
             ("change".into(), self.change.clone()),
-            ("importing_packages".into(), self.importing_packages.len().to_string()),
+            (
+                "importing_packages".into(),
+                self.importing_packages.len().to_string(),
+            ),
             ("importing_packages_list".into(), list.clone()),
             (
                 "called_from".into(),
-                if list.is_empty() { String::new() } else { format!("; called from {list}") },
+                if list.is_empty() {
+                    String::new()
+                } else {
+                    format!("; called from {list}")
+                },
             ),
             ("reach_functions".into(), self.reach_functions.to_string()),
             ("reach_files".into(), self.reach_files.to_string()),
@@ -508,7 +528,9 @@ impl Condition {
         };
         match actual {
             Value::Num(n) => {
-                let Ok(w) = want.parse::<f64>() else { return false };
+                let Ok(w) = want.parse::<f64>() else {
+                    return false;
+                };
                 match self.op.as_str() {
                     "==" => n == w,
                     "!=" => n != w,
@@ -539,8 +561,10 @@ impl Condition {
 /// `{key}` replaced from `values`; unknown keys become empty.
 fn render(template: &str, values: &HashMap<String, String>) -> String {
     let re = Regex::new(r"\{(\w+)\}").expect("valid regex");
-    re.replace_all(template, |c: &regex::Captures| values.get(&c[1]).cloned().unwrap_or_default())
-        .into_owned()
+    re.replace_all(template, |c: &regex::Captures| {
+        values.get(&c[1]).cloned().unwrap_or_default()
+    })
+    .into_owned()
 }
 
 // ----------------------------------------------------------------- input
@@ -562,6 +586,9 @@ pub struct ReachFunction {
     pub to: u32,
 }
 
+/// Finds the changed function (id, name) a head line belongs to.
+pub type OwnerOf<'a> = &'a dyn Fn(&str, u32) -> Option<(String, String)>;
+
 /// Everything the rules look at.
 pub struct Input<'a> {
     pub files: &'a [ChangedFile],
@@ -572,7 +599,7 @@ pub struct Input<'a> {
     /// Every file in the head tree, for sets.
     pub tree: &'a dyn Fn() -> Vec<String>,
     /// The changed function (id, name) a head line belongs to.
-    pub owner: &'a dyn Fn(&str, u32) -> Option<(String, String)>,
+    pub owner: OwnerOf<'a>,
 }
 
 // ------------------------------------------------------------- evaluation
@@ -590,7 +617,11 @@ impl RuleSet {
             .collect();
         if !wanted.is_empty() {
             let tree = (input.tree)();
-            for set in self.sets.iter().filter(|s| wanted.contains(s.config.name.as_str())) {
+            for set in self
+                .sets
+                .iter()
+                .filter(|s| wanted.contains(s.config.name.as_str()))
+            {
                 let texts: Vec<(String, String)> = tree
                     .iter()
                     .filter(|p| set.paths.is_match(p))
@@ -608,7 +639,9 @@ impl RuleSet {
         for s in input.symbols {
             let mut fired: HashSet<&str> = HashSet::new();
             for r in self.rules.iter().filter(|r| r.config.kind == Kind::Symbol) {
-                if fired.contains(r.config.name.as_str()) || !r.conditions.iter().all(|c| c.holds(s)) {
+                if fired.contains(r.config.name.as_str())
+                    || !r.conditions.iter().all(|c| c.holds(s))
+                {
                     continue;
                 }
                 fired.insert(&r.config.name);
@@ -620,7 +653,11 @@ impl RuleSet {
                     line: s.line,
                     function: Some(s.id.clone()),
                     excerpt: (input.read)(&s.path)
-                        .and_then(|t| t.lines().nth(s.line.saturating_sub(1) as usize).map(|l| l.trim().to_string()))
+                        .and_then(|t| {
+                            t.lines()
+                                .nth(s.line.saturating_sub(1) as usize)
+                                .map(|l| l.trim().to_string())
+                        })
                         .unwrap_or_default(),
                 });
             }
@@ -628,7 +665,12 @@ impl RuleSet {
 
         for f in input.files {
             let lines: Vec<&str> = f.head.lines().collect();
-            let excerpt = |l: u32| lines.get(l as usize - 1).map(|s| s.trim().to_string()).unwrap_or_default();
+            let excerpt = |l: u32| {
+                lines
+                    .get(l as usize - 1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default()
+            };
             let in_function = |l: u32| -> (Option<String>, String) {
                 match (input.owner)(&f.path, l) {
                     Some((id, name)) => (Some(id), format!(" in {name}")),
@@ -704,7 +746,9 @@ impl RuleSet {
                 if !r.applies_to(&f.path) {
                     continue;
                 }
-                let Some(text) = (input.read)(&f.path) else { continue };
+                let Some(text) = (input.read)(&f.path) else {
+                    continue;
+                };
                 let hit = text
                     .lines()
                     .enumerate()
@@ -715,7 +759,8 @@ impl RuleSet {
                             .is_some_and(|c| !r.unless.as_ref().is_some_and(|u| u.is_match(&c[0])))
                     });
                 if let Some((line, l)) = hit {
-                    let mut values = HashMap::from([("in_function".to_string(), format!(" in {}", f.name))]);
+                    let mut values =
+                        HashMap::from([("in_function".to_string(), format!(" in {}", f.name))]);
                     if let Some(c) = re.captures(l) {
                         values.extend(captures_map(re, &c));
                     }
@@ -733,8 +778,12 @@ impl RuleSet {
             }
         }
 
-        out.sort_by(|a, b| (a.severity, &a.rule, &a.path, a.line).cmp(&(b.severity, &b.rule, &b.path, b.line)));
-        out.dedup_by(|a, b| a.rule == b.rule && a.path == b.path && a.line == b.line && a.function == b.function);
+        out.sort_by(|a, b| {
+            (a.severity, &a.rule, &a.path, a.line).cmp(&(b.severity, &b.rule, &b.path, b.line))
+        });
+        out.dedup_by(|a, b| {
+            a.rule == b.rule && a.path == b.path && a.line == b.line && a.function == b.function
+        });
         self.fold(out)
     }
 
@@ -769,7 +818,12 @@ impl RuleSet {
 impl Rule {
     /// Severity and title for one hit: the first variant whose pattern
     /// matches the line or whose `when` fact holds, else the rule's own.
-    fn variant(&self, line: &str, facts: &[&str], values: &HashMap<String, String>) -> (Severity, String) {
+    fn variant(
+        &self,
+        line: &str,
+        facts: &[&str],
+        values: &HashMap<String, String>,
+    ) -> (Severity, String) {
         for (re, v) in &self.variants {
             let by_pattern = re.as_ref().is_some_and(|re| re.is_match(line));
             let by_fact = v.when.as_deref().is_some_and(|w| facts.contains(&w));
@@ -784,22 +838,40 @@ impl Rule {
 fn captures_map(re: &Regex, c: &regex::Captures) -> HashMap<String, String> {
     let mut m = HashMap::new();
     for name in re.capture_names().flatten() {
-        m.insert(name.to_string(), c.name(name).map(|x| x.as_str().trim().to_string()).unwrap_or_default());
+        m.insert(
+            name.to_string(),
+            c.name(name)
+                .map(|x| x.as_str().trim().to_string())
+                .unwrap_or_default(),
+        );
     }
     for i in 0..c.len() {
-        m.insert(i.to_string(), c.get(i).map(|x| x.as_str().trim().to_string()).unwrap_or_default());
+        m.insert(
+            i.to_string(),
+            c.get(i)
+                .map(|x| x.as_str().trim().to_string())
+                .unwrap_or_default(),
+        );
     }
     m
 }
 
-fn sql_findings(r: &Rule, f: &ChangedFile, sets: &HashMap<String, HashSet<String>>) -> Vec<Finding> {
+fn sql_findings(
+    r: &Rule,
+    f: &ChangedFile,
+    sets: &HashMap<String, HashSet<String>>,
+) -> Vec<Finding> {
     let re = r.pattern.as_ref().expect("checked");
     let head = risk::forward_half(&f.head);
     let lines: Vec<&str> = head.lines().collect();
     let all = risk::statements(&head);
     let created: HashSet<String> = all
         .iter()
-        .filter(|(_, s)| s.trim_start().to_ascii_lowercase().starts_with("create table"))
+        .filter(|(_, s)| {
+            s.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("create table")
+        })
         .filter_map(|(_, s)| risk::target_table(s))
         .collect();
     let mut out = Vec::new();
@@ -813,7 +885,10 @@ fn sql_findings(r: &Rule, f: &ChangedFile, sets: &HashMap<String, HashSet<String
                 continue;
             }
             if let Some(s) = &r.config.in_set {
-                let v = c.name(&s.capture).map(|m| m.as_str().to_ascii_lowercase()).unwrap_or_default();
+                let v = c
+                    .name(&s.capture)
+                    .map(|m| m.as_str().to_ascii_lowercase())
+                    .unwrap_or_default();
                 if !sets.get(&s.set).is_some_and(|set| set.contains(&v)) {
                     continue;
                 }
@@ -836,19 +911,27 @@ fn sql_findings(r: &Rule, f: &ChangedFile, sets: &HashMap<String, HashSet<String
                 path: f.path.clone(),
                 line: *line,
                 function: None,
-                excerpt: lines.get(*line as usize - 1).map(|s| s.trim().to_string()).unwrap_or_default(),
+                excerpt: lines
+                    .get(*line as usize - 1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default(),
             });
         }
     }
     out
 }
 
-const TS_EXTENSIONS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "svelte"];
+const TS_EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "svelte",
+];
 
 /// Lines of `@hit` captures (else each match's first) that pass the
 /// rule's filters, with the facts the filters established.
 fn ast_hits(r: &Rule, path: &str, source: &str) -> Vec<(u32, Vec<&'static str>)> {
-    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
     if !TS_EXTENSIONS.contains(&ext) {
         return Vec::new();
     }
@@ -866,8 +949,12 @@ fn ast_hits(r: &Rule, path: &str, source: &str) -> Vec<(u32, Vec<&'static str>)>
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(&text, None) else { return Vec::new() };
-    let Ok(query) = tree_sitter::Query::new(&language, r.config.query.as_deref().unwrap_or_default()) else {
+    let Some(tree) = parser.parse(&text, None) else {
+        return Vec::new();
+    };
+    let Ok(query) =
+        tree_sitter::Query::new(&language, r.config.query.as_deref().unwrap_or_default())
+    else {
         return Vec::new();
     };
     let hit = query.capture_index_for_name("hit");
@@ -912,7 +999,10 @@ fn ast_hits(r: &Rule, path: &str, source: &str) -> Vec<(u32, Vec<&'static str>)>
 /// `<tool>/<ruleId>`.
 pub fn sarif_findings(text: &str, root: &Path, files: &[ChangedFile]) -> Result<Vec<Finding>> {
     let log: serde_json::Value = serde_json::from_str(text).context("not JSON")?;
-    let runs = log.get("runs").and_then(|r| r.as_array()).ok_or_else(|| anyhow!("no `runs`"))?;
+    let runs = log
+        .get("runs")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| anyhow!("no `runs`"))?;
     let by_path: HashMap<&str, &ChangedFile> = files.iter().map(|f| (f.path.as_str(), f)).collect();
     let mut out = Vec::new();
     for run in runs {
@@ -921,18 +1011,41 @@ pub fn sarif_findings(text: &str, root: &Path, files: &[ChangedFile]) -> Result<
             .and_then(|v| v.as_str())
             .unwrap_or("sarif")
             .to_ascii_lowercase();
-        for res in run.get("results").and_then(|r| r.as_array()).into_iter().flatten() {
-            let Some(loc) = res.pointer("/locations/0/physicalLocation") else { continue };
-            let Some(uri) = loc.pointer("/artifactLocation/uri").and_then(|v| v.as_str()) else { continue };
-            let Some(line) = loc.pointer("/region/startLine").and_then(|v| v.as_u64()) else { continue };
+        for res in run
+            .get("results")
+            .and_then(|r| r.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(loc) = res.pointer("/locations/0/physicalLocation") else {
+                continue;
+            };
+            let Some(uri) = loc
+                .pointer("/artifactLocation/uri")
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let Some(line) = loc.pointer("/region/startLine").and_then(|v| v.as_u64()) else {
+                continue;
+            };
             let path = relative_uri(uri, root);
-            let Some(f) = by_path.get(path.as_str()) else { continue };
+            let Some(f) = by_path.get(path.as_str()) else {
+                continue;
+            };
             let line = line as u32;
             if !f.added.contains(&line) {
                 continue;
             }
-            let rule_id = res.get("ruleId").and_then(|v| v.as_str()).unwrap_or("result");
-            let severity = match res.get("level").and_then(|v| v.as_str()).unwrap_or("warning") {
+            let rule_id = res
+                .get("ruleId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("result");
+            let severity = match res
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("warning")
+            {
                 "error" => Severity::Medium,
                 _ => Severity::Low,
             };
@@ -948,7 +1061,12 @@ pub fn sarif_findings(text: &str, root: &Path, files: &[ChangedFile]) -> Result<
                 path: path.clone(),
                 line,
                 function: None,
-                excerpt: f.head.lines().nth(line as usize - 1).map(|l| l.trim().to_string()).unwrap_or_default(),
+                excerpt: f
+                    .head
+                    .lines()
+                    .nth(line as usize - 1)
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default(),
             });
         }
     }
@@ -972,19 +1090,37 @@ mod tests {
         tree: &'a [(&'a str, &'a str)],
         read: &'a dyn Fn(&str) -> Option<String>,
         list: &'a dyn Fn() -> Vec<String>,
-        owner: &'a dyn Fn(&str, u32) -> Option<(String, String)>,
+        owner: OwnerOf<'a>,
     ) -> Input<'a> {
         let _ = tree;
-        Input { files, symbols, reach: &[], read, tree: list, owner }
+        Input {
+            files,
+            symbols,
+            reach: &[],
+            read,
+            tree: list,
+            owner,
+        }
     }
 
     fn all_lines(text: &str) -> HashSet<u32> {
         (1..=text.lines().count() as u32).collect()
     }
 
-    fn run(rules: &RuleSet, files: Vec<ChangedFile>, symbols: Vec<SymbolFacts>, tree: Vec<(&str, &str)>) -> Vec<String> {
-        let tree_owned: Vec<(String, String)> = tree.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect();
-        let files_text: Vec<(String, String)> = files.iter().map(|f| (f.path.clone(), f.head.clone())).collect();
+    fn run(
+        rules: &RuleSet,
+        files: Vec<ChangedFile>,
+        symbols: Vec<SymbolFacts>,
+        tree: Vec<(&str, &str)>,
+    ) -> Vec<String> {
+        let tree_owned: Vec<(String, String)> = tree
+            .iter()
+            .map(|(p, t)| (p.to_string(), t.to_string()))
+            .collect();
+        let files_text: Vec<(String, String)> = files
+            .iter()
+            .map(|f| (f.path.clone(), f.head.clone()))
+            .collect();
         let read = move |p: &str| -> Option<String> {
             tree_owned
                 .iter()
@@ -1041,7 +1177,11 @@ async function f(xs, reader, plans, ids) {
   }
 }
 ";
-        let files = vec![ChangedFile { path: "a.ts".into(), head: src.into(), added: all_lines(src) }];
+        let files = vec![ChangedFile {
+            path: "a.ts".into(),
+            head: src.into(),
+            added: all_lines(src),
+        }];
         assert_eq!(
             run(&defaults(), files, vec![], vec![]),
             vec![
@@ -1080,7 +1220,12 @@ ALTER TABLE orders DROP COLUMN owner_id;
             head: head.into(),
             added: all_lines(head),
         }];
-        let mut got = run(&defaults(), files, vec![], vec![("db/migrations/0.sql", domains)]);
+        let mut got = run(
+            &defaults(),
+            files,
+            vec![],
+            vec![("db/migrations/0.sql", domains)],
+        );
         got.sort();
         let mut want = vec![
             "migration-drop@2:high",
@@ -1097,19 +1242,22 @@ ALTER TABLE orders DROP COLUMN owner_id;
 
     #[test]
     fn symbol_tiers_pick_the_first_that_holds() {
-        let s = |name: &str, exported: bool, importers: usize, reach: usize, route: Option<&str>| SymbolFacts {
-            id: name.into(),
-            name: name.into(),
-            path: "x.ts".into(),
-            line: 1,
-            change: "changed".into(),
-            exported,
-            route: route.map(str::to_string),
-            importing_packages: (0..importers).map(|i| format!("p{i}")).collect(),
-            reach_functions: reach,
-            reach_packages: importers + 1,
-            ..Default::default()
-        };
+        let s =
+            |name: &str, exported: bool, importers: usize, reach: usize, route: Option<&str>| {
+                SymbolFacts {
+                    id: name.into(),
+                    name: name.into(),
+                    path: "x.ts".into(),
+                    line: 1,
+                    change: "changed".into(),
+                    exported,
+                    route: route.map(str::to_string),
+                    importing_packages: (0..importers).map(|i| format!("p{i}")).collect(),
+                    reach_functions: reach,
+                    reach_packages: importers + 1,
+                    ..Default::default()
+                }
+            };
         let symbols = vec![
             s("lib", true, 3, 40, None),
             s("domain", true, 1, 5, None),
@@ -1154,27 +1302,52 @@ title = "runs with admin privileges{in_function}"
             .iter()
             .map(|r| (r.config.name.as_str(), r.source.as_str()))
             .collect();
-        assert!(!names.iter().any(|(n, _)| *n == "await-in-loop"), "typescript preset not chosen");
+        assert!(
+            !names.iter().any(|(n, _)| *n == "await-in-loop"),
+            "typescript preset not chosen"
+        );
         assert!(!names.iter().any(|(n, _)| *n == "wide-reach"), "disabled");
         assert_eq!(
-            names.iter().filter(|(n, _)| *n == "migration-index-lock").collect::<Vec<_>>(),
+            names
+                .iter()
+                .filter(|(n, _)| *n == "migration-index-lock")
+                .collect::<Vec<_>>(),
             vec![&("migration-index-lock", "prognost.toml")]
         );
         let src = "x();\nawait runWithAdminPrivileges(c, q);\n";
-        let files = vec![ChangedFile { path: "a.ts".into(), head: src.into(), added: [2].into() }];
-        assert_eq!(run(&rules, files, vec![], vec![]), vec!["admin-privileges@2:high"]);
+        let files = vec![ChangedFile {
+            path: "a.ts".into(),
+            head: src.into(),
+            added: [2].into(),
+        }];
+        assert_eq!(
+            run(&rules, files, vec![], vec![]),
+            vec!["admin-privileges@2:high"]
+        );
     }
 
     #[test]
     fn bad_rules_are_refused_with_the_reason() {
         for (text, needle) in [
             ("[[risk]]\nname = \"a\"\ntitle = \"t\"\n", "needs a pattern"),
-            ("[[risk]]\nname = \"a\"\nkind = \"symbol\"\nwhere = [\"colour > 2\"]\ntitle = \"t\"\n", "unknown field"),
-            ("[[risk]]\nname = \"a\"\nkind = \"ast\"\nquery = \"(nope\"\ntitle = \"t\"\n", "query"),
+            (
+                "[[risk]]\nname = \"a\"\nkind = \"symbol\"\nwhere = [\"colour > 2\"]\ntitle = \"t\"\n",
+                "unknown field",
+            ),
+            (
+                "[[risk]]\nname = \"a\"\nkind = \"ast\"\nquery = \"(nope\"\ntitle = \"t\"\n",
+                "query",
+            ),
             ("presets = [\"cobol\"]\n", "unknown preset"),
-            ("[[risk]]\nname = \"a\"\npattern = \"x\"\ntitel = \"t\"\n", "unknown field"),
+            (
+                "[[risk]]\nname = \"a\"\npattern = \"x\"\ntitel = \"t\"\n",
+                "unknown field",
+            ),
         ] {
-            let e = RuleSet::from_config_text(Some(text), "cfg").err().map(|e| format!("{e:#}")).unwrap_or_default();
+            let e = RuleSet::from_config_text(Some(text), "cfg")
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default();
             assert!(e.contains(needle), "{text:?} → {e}");
         }
     }
@@ -1187,7 +1360,11 @@ title = "runs with admin privileges{in_function}"
             {"ruleId":"no-await-in-loop","level":"error","message":{"text":"old"},
              "locations":[{"physicalLocation":{"artifactLocation":{"uri":"src/a.ts"},"region":{"startLine":1}}}]}
         ]}]}"#;
-        let files = vec![ChangedFile { path: "src/a.ts".into(), head: "a\nb\n".into(), added: [2].into() }];
+        let files = vec![ChangedFile {
+            path: "src/a.ts".into(),
+            head: "a\nb\n".into(),
+            added: [2].into(),
+        }];
         let got = sarif_findings(sarif, Path::new("/repo"), &files).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].rule, "eslint/no-await-in-loop");
