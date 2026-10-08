@@ -152,6 +152,11 @@ prognost rules                       # the rules in force here
 prognost <file>[:<symbol>]           # one file: its functions aligned across the revisions
 ```
 
+Output is coloured on a terminal and plain when piped. `--color
+auto|always|never` (or `--no-color`) chooses explicitly; `NO_COLOR` and
+`CLICOLOR_FORCE` are honoured. With colour off, the graph marks changes by
+underline and the selection by reverse video.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

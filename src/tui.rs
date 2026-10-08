@@ -70,7 +70,12 @@ impl App {
 
     pub fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
-            terminal.draw(|f| self.draw(f))?;
+            terminal.draw(|f| {
+                self.draw(f);
+                if !crate::color::enabled() {
+                    crate::color::strip_buffer(f.buffer_mut());
+                }
+            })?;
             self.handle_event(event::read()?);
         }
         Ok(())

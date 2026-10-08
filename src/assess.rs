@@ -176,30 +176,45 @@ impl Assessment {
     }
 
     pub fn to_text(&self) -> String {
+        use crate::color as c;
         let mut out = String::new();
         let short = |s: &str| s.chars().take(10).collect::<String>();
         out.push_str(&format!(
-            "prognost assess  {} → {}\n\n",
-            short(&self.base),
-            self.head.as_deref().map(short).unwrap_or_else(|| "working tree".into())
+            "{}  {} → {}\n\n",
+            c::bold("prognost assess"),
+            c::dim(&short(&self.base)),
+            c::dim(&self.head.as_deref().map(short).unwrap_or_else(|| "working tree".into()))
         ));
         if self.findings.is_empty() {
-            out.push_str("No rule matched.\n");
+            out.push_str(&c::green("No rule matched.\n"));
         }
         for r in &self.findings {
-            let icon = match r.severity {
-                Severity::High => "⚠ high  ",
-                Severity::Medium => "⚠ medium",
-                Severity::Low => "· low   ",
+            // Pad first, colour after: escape codes would throw the columns off.
+            let (icon, paint): (&str, fn(&str) -> String) = match r.severity {
+                Severity::High => ("⚠ high  ", c::bold_red),
+                Severity::Medium => ("⚠ medium", c::bold_yellow),
+                Severity::Low => ("· low   ", c::dim),
             };
-            out.push_str(&format!("  {icon} {:<34} {}\n", r.rule, r.title));
+            out.push_str(&format!(
+                "  {} {} {}\n",
+                paint(icon),
+                c::bold(&format!("{:<34}", r.rule)),
+                r.title
+            ));
             let excerpt: String = r.excerpt.chars().take(90).collect();
             let more = if r.excerpt.chars().count() > 90 { "…" } else { "" };
-            out.push_str(&format!("             {}:{}  {excerpt}{more}\n", r.path, r.line));
+            out.push_str(&format!(
+                "             {}  {}\n",
+                c::cyan(&format!("{}:{}", r.path, r.line)),
+                c::dim(&format!("{excerpt}{more}"))
+            ));
         }
         out.push_str(&format!(
-            "\nAssessment: {} high, {} medium, {} low.\n",
-            self.counts.high, self.counts.medium, self.counts.low
+            "\n{} {}, {}, {}.\n",
+            c::bold("Assessment:"),
+            c::bold_red(&format!("{} high", self.counts.high)),
+            c::bold_yellow(&format!("{} medium", self.counts.medium)),
+            c::dim(&format!("{} low", self.counts.low))
         ));
         out
     }

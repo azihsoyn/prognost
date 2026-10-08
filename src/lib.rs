@@ -1,5 +1,6 @@
 pub mod align;
 pub mod bindings;
+pub mod color;
 pub mod assess;
 pub mod api;
 pub mod file_hub;

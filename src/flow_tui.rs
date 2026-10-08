@@ -526,7 +526,12 @@ impl App {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
         let mut result = Ok(());
         while !self.quit {
-            if let Err(e) = terminal.draw(|f| self.draw(f)) {
+            if let Err(e) = terminal.draw(|f| {
+                self.draw(f);
+                if !crate::color::enabled() {
+                    crate::color::strip_buffer(f.buffer_mut());
+                }
+            }) {
                 result = Err(e.into());
                 break;
             }
@@ -2838,7 +2843,11 @@ impl App {
             keys,
         );
         f.render_widget(
-            Paragraph::new("colors: yellow = body changed · green = added · red = removed · gray = unchanged · green/red line = call added/removed · magenta line = the selected node's call chains (bright = its own calls)")
+            Paragraph::new(if crate::color::enabled() {
+                "colors: yellow = body changed · green = added · red = removed · gray = unchanged · green/red line = call added/removed · magenta line = the selected node's call chains (bright = its own calls)"
+            } else {
+                "no colour: underlined = changed, added or removed · dim = unchanged · reversed = selected · Enter on a node shows what changed"
+            })
                 .style(Style::default().fg(Color::DarkGray)),
             legend,
         );

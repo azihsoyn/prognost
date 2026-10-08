@@ -38,6 +38,10 @@ default branch) and --head (default: the working tree), like
   prognost map                           the older file-level dependency map (see `prognost map --help`)
   prognost --api '<JSON>' | --schema     one request in an envelope / the JSON schemas
 
+  --color <auto|always|never>, --no-color
+                                         colour in any command's output (default auto: on for a terminal; off when
+                                         piped, or when NO_COLOR is set; CLICOLOR_FORCE=1 forces it on)
+
   Earlier spellings still work: `prognost --base <rev>` (= graph), `--dump <file>` (the graph as text),
   `--serve`, and `--impact [--json] [--hops N]` (superseded by plan).
 
@@ -53,6 +57,9 @@ fn out(body: &str) {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--color` / `--no-color` apply to every command, wherever they sit.
+    let (choice, args) = prognost::color::take_option(args).map_err(|e| anyhow::anyhow!(e))?;
+    prognost::color::init(choice);
     let first = args.first().map(String::as_str).unwrap_or("");
 
     match first {
@@ -115,7 +122,7 @@ fn run_rules(args: &[String]) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&rules)?);
         return Ok(());
     }
-    println!("config: {}", prognost::seam::config_path(&root).display());
+    println!("{} {}", prognost::color::bold("config:"), prognost::seam::config_path(&root).display());
     for r in &set.rules {
         let c = &r.config;
         let kind = serde_json::to_value(c.kind).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
@@ -124,13 +131,20 @@ fn run_rules(args: &[String]) -> Result<()> {
             prognost::rules::Kind::Ast => c.query.clone().unwrap_or_default(),
             _ => c.pattern.clone().unwrap_or_default(),
         };
+        use prognost::color as col;
+        let sev = format!("{:<6}", c.severity.as_str());
+        let sev = match c.severity {
+            prognost::risk::Severity::High => col::bold_red(&sev),
+            prognost::risk::Severity::Medium => col::bold_yellow(&sev),
+            prognost::risk::Severity::Low => col::dim(&sev),
+        };
         println!(
-            "  {:<36} {:<6} {:<6} {:<16} {}",
-            c.name,
+            "  {} {:<6} {} {} {}",
+            col::bold(&format!("{:<36}", c.name)),
             kind,
-            c.severity.as_str(),
-            r.source,
-            when.chars().take(70).collect::<String>()
+            sev,
+            col::cyan(&format!("{:<16}", r.source)),
+            col::dim(&when.chars().take(70).collect::<String>())
         );
     }
     Ok(())
@@ -415,9 +429,10 @@ fn print_report(
     let entry = symbol
         .map(|s| format!("{}:{s}", file.display()))
         .unwrap_or_else(|| file.display().to_string());
-    out(&format!("flow: {entry}"));
-    out(&format!("base: {}", base_rev.label()));
-    out(&format!("head: {}", head_rev.label()));
+    use prognost::color as col;
+    out(&format!("{} {entry}", col::bold("flow:")));
+    out(&format!("{} {}", col::bold("base:"), col::dim(&base_rev.label())));
+    out(&format!("{} {}", col::bold("head:"), col::dim(&head_rev.label())));
     out("");
     out(&format!(
         "{} changed, {} unchanged (collapsed)",
@@ -431,10 +446,12 @@ fn print_report(
 
 fn print_row(row: &Row) {
     let indent = "  ".repeat(row.depth);
+    use prognost::color as col;
     let marker = match row.kind {
-        Kind::Added => "+ added   ",
-        Kind::Removed => "- removed ",
-        Kind::Changed | Kind::Unchanged => "  matched ",
+        Kind::Added => col::green("+ added   "),
+        Kind::Removed => col::red("- removed "),
+        Kind::Changed => col::yellow("  matched "),
+        Kind::Unchanged => "  matched ".to_string(),
     };
     let exported = if row.exported { "  (exported)" } else { "" };
     let range = match (row.base_range, row.head_range) {
@@ -443,11 +460,11 @@ fn print_row(row: &Row) {
         (None, Some(h)) => format!("  head:{}-{}", h.0, h.1),
         (None, None) => String::new(),
     };
-    out(&format!("{indent}{marker}{}{exported}{range}", row.label));
+    out(&format!("{indent}{marker}{}{exported}{}", col::bold(&row.label), col::dim(&range)));
     for change in &row.details {
         match change {
-            align::CallChange::Added(c) => out(&format!("{indent}    + call added:   {c}")),
-            align::CallChange::Removed(c) => out(&format!("{indent}    - call removed: {c}")),
+            align::CallChange::Added(c) => out(&format!("{indent}    {}{c}", col::green("+ call added:   "))),
+            align::CallChange::Removed(c) => out(&format!("{indent}    {}{c}", col::red("- call removed: "))),
         }
     }
 }

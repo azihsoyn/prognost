@@ -175,44 +175,50 @@ impl PlanReport {
     }
 
     pub fn to_text(&self) -> String {
+        use crate::color as c;
         let mut out = String::new();
         let short = |s: &str| s.chars().take(10).collect::<String>();
         out.push_str(&format!(
-            "prognost plan  {} → {}\n\n",
-            short(&self.base),
-            self.head.as_deref().map(short).unwrap_or_else(|| "working tree".into())
+            "{}  {} → {}\n\n",
+            c::bold("prognost plan"),
+            c::dim(&short(&self.base)),
+            c::dim(&self.head.as_deref().map(short).unwrap_or_else(|| "working tree".into()))
         ));
 
-        let c = &self.summary.changed;
+        let n = &self.summary.changed;
         out.push_str(&format!(
-            "Changed symbols: {}  (~{} changed, +{} added, -{} removed)\n",
-            c.added + c.changed + c.removed,
-            c.changed,
-            c.added,
-            c.removed
+            "{}  ({} changed, {} added, {} removed)\n",
+            c::bold(&format!("Changed symbols: {}", n.added + n.changed + n.removed)),
+            c::yellow(&format!("~{}", n.changed)),
+            c::green(&format!("+{}", n.added)),
+            c::red(&format!("-{}", n.removed))
         ));
         for s in self.summary.symbols.iter().take(15) {
             let Some(f) = self.function(&s.id) else { continue };
-            let mark = match f.change {
-                Change::Added => '+',
-                Change::Removed => '-',
-                _ => '~',
+            let (mark, paint): (&str, fn(&str) -> String) = match f.change {
+                Change::Added => ("+", c::green),
+                Change::Removed => ("-", c::red),
+                _ => ("~", c::yellow),
             };
             let name = f.route.as_deref().unwrap_or(&f.name);
             let reach = if s.reach_functions == 0 {
                 String::new()
             } else {
                 format!(
-                    "  ← {} fn / {} pkg{}",
-                    s.reach_functions,
-                    s.reach_packages,
-                    if s.public { " · public" } else { "" }
+                    "  {}{}",
+                    c::cyan(&format!("← {} fn / {} pkg", s.reach_functions, s.reach_packages)),
+                    if s.public { format!(" · {}", c::magenta("public")) } else { String::new() }
                 )
             };
-            out.push_str(&format!("  {mark} {name}  {}:{}{reach}\n", f.path, f.range.start));
+            out.push_str(&format!(
+                "  {} {}  {}{reach}\n",
+                paint(mark),
+                paint(&c::bold(name)),
+                c::dim(&format!("{}:{}", f.path, f.range.start))
+            ));
         }
         if self.summary.symbols.len() > 15 {
-            out.push_str(&format!("  … {} more (--json for all)\n", self.summary.symbols.len() - 15));
+            out.push_str(&c::dim(&format!("  … {} more (--json for all)\n", self.summary.symbols.len() - 15)));
         }
 
         // Files the function list says nothing about.
@@ -228,27 +234,30 @@ impl PlanReport {
             .filter(|f| !with_functions.contains(f.path.as_str()))
             .collect();
         if !others.is_empty() {
-            out.push_str(&format!("\nOther changed files: {}\n", others.len()));
+            out.push_str(&format!("\n{}\n", c::bold(&format!("Other changed files: {}", others.len()))));
             for f in others.iter().take(20) {
                 let mark = match f.change {
-                    FileChangeKind::Added => '+',
-                    FileChangeKind::Deleted => '-',
-                    FileChangeKind::Renamed => '>',
-                    FileChangeKind::Modified => '~',
+                    FileChangeKind::Added => c::green("+"),
+                    FileChangeKind::Deleted => c::red("-"),
+                    FileChangeKind::Renamed => c::blue(">"),
+                    FileChangeKind::Modified => c::yellow("~"),
                 };
                 out.push_str(&format!("  {mark} {}\n", f.path));
             }
             if others.len() > 20 {
-                out.push_str(&format!("  … {} more (--json for all)\n", others.len() - 20));
+                out.push_str(&c::dim(&format!("  … {} more (--json for all)\n", others.len() - 20)));
             }
         }
 
         let r = &self.summary.reach;
         out.push_str(&format!(
-            "\nReach: {} functions in {} files / {} packages",
-            r.functions,
-            r.files,
-            r.packages.len()
+            "\n{}",
+            c::bold(&format!(
+                "Reach: {} functions in {} files / {} packages",
+                r.functions,
+                r.files,
+                r.packages.len()
+            ))
         ));
         if !r.entries.is_empty() {
             let kinds: Vec<String> = r.entries.iter().map(|(k, n)| format!("{n} {k}")).collect();
@@ -259,26 +268,28 @@ impl PlanReport {
             .packages
             .iter()
             .take(8)
-            .map(|p| format!("{} ← {}", p.package, p.functions))
+            .map(|p| format!("{} ← {}", c::cyan(&p.package), p.functions))
             .collect();
         if !pkgs.is_empty() {
             out.push_str(&format!("  {}\n", pkgs.join("   ")));
         }
         out.push_str(&format!(
-            "\nPlan: {} to add, {} to change, {} to remove ({} files); reaching {} functions in {} packages.\n",
-            c.added,
-            c.changed,
-            c.removed,
+            "\n{} {} to add, {} to change, {} to remove ({} files); reaching {} functions in {} packages.\n",
+            c::bold("Plan:"),
+            c::green(&n.added.to_string()),
+            c::yellow(&n.changed.to_string()),
+            c::red(&n.removed.to_string()),
             self.files.len(),
             r.functions,
             r.packages.len()
         ));
         if self.truncated {
-            out.push_str(&format!(
+            out.push_str(&c::yellow(&format!(
                 "Note: the caller walk stopped at its limit ({} hops / {} nodes); reach is a lower bound.\n",
                 self.limits.hops, self.limits.nodes
-            ));
+            )));
         }
         out
     }
+
 }
