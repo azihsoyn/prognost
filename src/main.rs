@@ -20,9 +20,10 @@ Commands:
           it opens in a pane beside the caller; --pane asks for that explicitly.
           --html <file>   the same graph as a self-contained web page
           --dump <file>   the same graph as text
-  serve   [host:port] [--base <rev>] [--head <rev>] [--pr <number>]
+  serve   [host:port] [--base <rev>] [--head <rev>] [--pr <number>] [--expose]
           the web page over HTTP (default 127.0.0.1:7357), with seen marks kept in
-          sync with GitHub's Viewed checkboxes (needs `gh`)
+          sync with GitHub's Viewed checkboxes (needs `gh`). Only this machine may
+          connect unless --expose: the page acts with your GitHub login
   plan    [--base <rev>] [--head <rev>] [--json] [--hops N]
           what the diff changes and how far it reaches: the changed functions, their
           callers up to the entry points, the files
@@ -34,6 +35,8 @@ Commands:
           the rules in force: presets plus the repository's prognost.toml
   align   <file>[:<symbol>] [--base <rev>] [--head <rev>] [--text]
           one file: its functions aligned across the two revisions
+  cache   [clean]
+          the commit trees kept between runs (where, how much), or remove them
 
 Options for every command:
   --color <auto|always|never>, --no-color
@@ -86,6 +89,23 @@ fn main() -> Result<()> {
                     rest.push(a.clone());
                 }
             }
+            // The page's API marks files Viewed on GitHub with your own
+            // `gh` login, and has no authentication of its own: only this
+            // machine may reach it unless --expose says otherwise.
+            let expose = rest.iter().any(|a| a == "--expose");
+            rest.retain(|a| a != "--expose");
+            let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            let loopback = host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback());
+            if !loopback && !expose {
+                bail!(
+                    "{addr} can be reached from other machines, and the page can mark files Viewed on GitHub with your gh login — \
+                     anyone who can reach it could. Serve on 127.0.0.1, or add --expose if that is what you want."
+                );
+            }
             rest.push("--serve".into());
             rest.push(addr);
             run_compare(&rest, Stage::Serve)
@@ -94,9 +114,53 @@ fn main() -> Result<()> {
         "assess" => run_assess(&args[1..]),
         "rules" => run_rules(&args[1..]),
         "align" => run_compare(&args[1..], Stage::Align),
+        "cache" => run_cache(&args[1..]),
         // Kept for a tool that still reads its JSON; `plan --json` supersedes it.
         _ if args.iter().any(|a| a == "--impact") => run_compare(&args, Stage::Impact),
         other => bail!("unknown command {other:?} — see `prognost --help`"),
+    }
+}
+
+/// `prognost cache [clean]`: where extracted commit trees are kept, how
+/// much they take, and removing them.
+fn run_cache(args: &[String]) -> Result<()> {
+    let human = |b: u64| -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"];
+        let mut v = b as f64;
+        let mut u = 0;
+        while v >= 1024.0 && u < units.len() - 1 {
+            v /= 1024.0;
+            u += 1;
+        }
+        if u == 0 {
+            format!("{b} B")
+        } else {
+            format!("{v:.1} {}", units[u])
+        }
+    };
+    let dir = prognost::rev::cache_dir();
+    match args.first().map(String::as_str) {
+        None => {
+            let (trees, bytes) = prognost::rev::cache_usage();
+            println!("{}", dir.display());
+            println!(
+                "{trees} commit tree{} · {}",
+                if trees == 1 { "" } else { "s" },
+                human(bytes)
+            );
+            Ok(())
+        }
+        Some("clean") => {
+            let (trees, bytes) = prognost::rev::clean_cache()?;
+            println!(
+                "removed {trees} commit tree{} ({}) from {}",
+                if trees == 1 { "" } else { "s" },
+                human(bytes),
+                dir.display()
+            );
+            Ok(())
+        }
+        Some(other) => bail!("cache {other}: expected `prognost cache` or `prognost cache clean`"),
     }
 }
 
@@ -313,9 +377,28 @@ fn run_compare(args: &[String], stage: Stage) -> Result<()> {
         if let Stage::Plan = &stage {
             let base_ws = workspace::discover(&root, &base_rev)?;
             let head_ws = workspace::discover(&root, &head_rev)?;
-            let mut app =
-                flow_tui::App::from_changes(root.clone(), base_rev, head_rev, base_ws, head_ws)?;
-            let report = app.plan_report(hops)?;
+            // No function changed (docs, config, SQL, another language):
+            // still a plan — its files — so CI and assess carry on.
+            let files =
+                prognost::plan::file_changes(&root, &base_rev, &head_rev, &base_ws, &head_ws)?;
+            let report = match flow_tui::App::from_changes(
+                root.clone(),
+                base_rev,
+                head_rev,
+                base_ws,
+                head_ws,
+            ) {
+                Ok(mut app) => app.plan_report(hops)?,
+                Err(e) if e.to_string().starts_with("no changed functions") => {
+                    prognost::plan::PlanReport::files_only(
+                        base_sha.clone(),
+                        head.clone(),
+                        files,
+                        prognost::impact::Limits { hops, nodes: 0 },
+                    )
+                }
+                Err(e) => return Err(e),
+            };
             if json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -325,63 +408,76 @@ fn run_compare(args: &[String], stage: Stage) -> Result<()> {
         }
         let base_ws = workspace::discover(&root, &base_rev)?;
         let head_ws = workspace::discover(&root, &head_rev)?;
-        let mut app =
-            match flow_tui::App::from_changes(root.clone(), base_rev, head_rev, base_ws, head_ws) {
-                Ok(app) => app,
-                // A diff with no function-level change (constants, config,
-                // markup): --impact still names the packages it touched.
-                Err(e) if impact && e.to_string().starts_with("no changed functions") => {
-                    let base_rev = Rev::commit(base_sha.clone());
-                    let head_rev = match &head {
-                        Some(h) => Rev::commit(h.clone()),
-                        None => Rev::working(),
-                    };
-                    let ws = workspace::discover(&root, &head_rev)?;
-                    let files = origin::changed_files_between(&root, &base_rev, &head_rev)?;
-                    let mut by_pkg: std::collections::BTreeMap<String, usize> = Default::default();
-                    for f in &files {
-                        let pkg = ws
-                            .owning_package(f)
-                            .and_then(|p| p.name.clone())
-                            .unwrap_or_else(|| "(outside any package)".to_string());
-                        *by_pkg.entry(pkg).or_default() += 1;
-                    }
-                    if json {
-                        let report = prognost::impact::ImpactReport {
-                            version: prognost::impact::IMPACT_VERSION,
-                            base: base_sha.clone(),
-                            head: head.clone(),
-                            changed: Vec::new(),
-                            chains: Vec::new(),
-                            packages: prognost::impact::Packages {
-                                changed: by_pkg
-                                    .iter()
-                                    .map(|(p, n)| prognost::impact::PackageChange {
-                                        package: p.clone(),
-                                        files: *n,
-                                        functions: 0,
-                                    })
-                                    .collect(),
-                                affected: Vec::new(),
-                                crossings: Vec::new(),
-                            },
-                            truncated: false,
-                            limits: prognost::impact::Limits { hops, nodes: 0 },
-                        };
-                        println!("{}", serde_json::to_string(&report)?);
-                    } else {
-                        println!(
-                            "changed (no function-level changes — data, config or markup only):"
-                        );
-                        for (p, n) in &by_pkg {
-                            println!("  {p:<32} {n} file{}", if *n == 1 { "" } else { "s" });
-                        }
-                        println!("affected upstream: not derivable without a changed function");
-                    }
-                    return Ok(());
+        let mut app = match flow_tui::App::from_changes(
+            root.clone(),
+            base_rev,
+            head_rev,
+            base_ws,
+            head_ws,
+        ) {
+            Ok(app) => app,
+            // A diff with no function-level change (constants, config,
+            // markup): --impact still names the packages it touched.
+            Err(e) if impact && e.to_string().starts_with("no changed functions") => {
+                let base_rev = Rev::commit(base_sha.clone());
+                let head_rev = match &head {
+                    Some(h) => Rev::commit(h.clone()),
+                    None => Rev::working(),
+                };
+                let ws = workspace::discover(&root, &head_rev)?;
+                let files = origin::changed_files_between(&root, &base_rev, &head_rev)?;
+                let mut by_pkg: std::collections::BTreeMap<String, usize> = Default::default();
+                for f in &files {
+                    let pkg = ws
+                        .owning_package(f)
+                        .and_then(|p| p.name.clone())
+                        .unwrap_or_else(|| "(outside any package)".to_string());
+                    *by_pkg.entry(pkg).or_default() += 1;
                 }
-                Err(e) => return Err(e),
-            };
+                if json {
+                    let report = prognost::impact::ImpactReport {
+                        version: prognost::impact::IMPACT_VERSION,
+                        base: base_sha.clone(),
+                        head: head.clone(),
+                        changed: Vec::new(),
+                        chains: Vec::new(),
+                        packages: prognost::impact::Packages {
+                            changed: by_pkg
+                                .iter()
+                                .map(|(p, n)| prognost::impact::PackageChange {
+                                    package: p.clone(),
+                                    files: *n,
+                                    functions: 0,
+                                })
+                                .collect(),
+                            affected: Vec::new(),
+                            crossings: Vec::new(),
+                        },
+                        truncated: false,
+                        limits: prognost::impact::Limits { hops, nodes: 0 },
+                    };
+                    println!("{}", serde_json::to_string(&report)?);
+                } else {
+                    println!("changed (no function-level changes — data, config or markup only):");
+                    for (p, n) in &by_pkg {
+                        println!("  {p:<32} {n} file{}", if *n == 1 { "" } else { "s" });
+                    }
+                    println!("affected upstream: not derivable without a changed function");
+                }
+                return Ok(());
+            }
+            Err(e) if e.to_string().starts_with("no changed functions") => {
+                println!(
+                    "No function changed between {} and {}: nothing to draw. `prognost plan` lists the files that did change.",
+                    &base_sha[..base_sha.len().min(10)],
+                    head.as_deref()
+                        .map(|h| &h[..h.len().min(10)])
+                        .unwrap_or("the working tree")
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
         for (pkg, level) in &lods {
             app.set_lod(pkg, *level);
         }

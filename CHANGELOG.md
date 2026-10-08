@@ -22,3 +22,16 @@ follow [Semantic Versioning](https://semver.org/).
 - herdr: `graph` without a terminal opens in a pane beside the caller; `o`
   edits in a pane beside the graph.
 - `--color auto|always|never`, `--no-color`, `NO_COLOR`, `CLICOLOR_FORCE`.
+- `cache`: where extracted commit trees are kept and how much they take;
+  `cache clean` removes them.
+
+### Fixed
+
+- A diff that changes no function (docs, config, SQL, another language) no
+  longer fails `plan`: it gives a plan of its files, which `assess` still
+  judges; `graph` says there is nothing to draw.
+
+### Security
+
+- `serve` listens only on loopback addresses unless `--expose`: its API
+  acts with your `gh` login and has no authentication of its own.

@@ -126,10 +126,31 @@ GitHub's *Viewed* checkboxes.
 4. From each changed function, callers are followed up to the entry points:
    routes, components, module code, exports nothing calls.
 
-It covers TypeScript and JavaScript (including the scripts of Svelte
-components) in pnpm-style workspaces today. The graph is inferred: dynamic
-dispatch, dependency injection and callbacks can hide an edge, so reach is
-a lower bound, never a proof that something else is safe.
+The graph is inferred: dynamic dispatch, dependency injection and callbacks
+handed through untyped values can hide an edge, so reach is a lower bound,
+never a proof that something else is safe. What it reads is listed below.
+
+## What it supports
+
+| | | |
+|---|---|---|
+| **Languages** | TypeScript, JavaScript (`.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs`) | ✅ functions, calls, imports |
+| | Svelte components (`.svelte`) | ✅ the `<script>` blocks; markup is not parsed |
+| | Vue single-file components, Angular templates | ❌ the files appear in `plan`, their calls are not followed |
+| | Any other language | ❌ the files appear in `plan`, their calls are not followed |
+| **Modules** | relative imports, package names, barrels (`export * from`), tsconfig `paths` | ✅ |
+| | CommonJS `require` | ◐ files that `require` a module count as importing it; calls through the binding are not resolved |
+| **Workspaces** | pnpm (`pnpm-workspace.yaml`), npm and yarn (`package.json` `workspaces`) | ✅ |
+| | a single package | ✅ |
+| **Across HTTP** | Hono's typed client (`client.api.….$post`) → its routes | ✅ |
+| | `fetch`, axios, other clients | ➖ add a [seam](docs/config.md#seams-calls-joined-by-a-string) |
+| **Across strings** | events, queues, job names, DI tokens | ➖ add a [seam](docs/config.md#seams-calls-joined-by-a-string) |
+| **Risk rules** | call graph (public API, reach), TypeScript (await in loops), PostgreSQL migrations | ✅ built in |
+| | anything else | ➖ your own `[[risk]]` rules, or another analyser's SARIF |
+| **Platforms** | macOS, Linux | ✅ tested in CI |
+| | Windows | ❔ untested; the editor key and commit extraction call `sh` and `tar` |
+
+✅ supported · ◐ partly · ➖ through configuration · ❌ not supported · ❔ unknown
 
 ## Why not an LLM
 

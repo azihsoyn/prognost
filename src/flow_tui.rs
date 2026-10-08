@@ -5005,28 +5005,13 @@ impl App {
         calls.sort_by(|x, y| (&x.caller, &x.callee).cmp(&(&y.caller, &y.callee)));
 
         // Facts: the files.
-        let files: Vec<FileChange> =
-            crate::origin::changed_file_statuses(&self.root, &self.base_rev, &self.head_rev)?
-                .into_iter()
-                .map(|st| {
-                    let package = self
-                        .head_ws
-                        .owning_package(&st.path)
-                        .or_else(|| self.base_ws.owning_package(&st.path))
-                        .and_then(|p| p.name.clone());
-                    FileChange {
-                        path: st.path.to_string_lossy().into_owned(),
-                        change: match st.status {
-                            'A' | 'C' => FileChangeKind::Added,
-                            'D' => FileChangeKind::Deleted,
-                            'R' => FileChangeKind::Renamed,
-                            _ => FileChangeKind::Modified,
-                        },
-                        previous_path: st.from.map(|p| p.to_string_lossy().into_owned()),
-                        package,
-                    }
-                })
-                .collect();
+        let files = crate::plan::file_changes(
+            &self.root,
+            &self.base_rev,
+            &self.head_rev,
+            &self.base_ws,
+            &self.head_ws,
+        )?;
 
         // Summary: the reach together.
         let mut per_pkg: BTreeMap<String, (usize, HashSet<PathBuf>)> = BTreeMap::new();

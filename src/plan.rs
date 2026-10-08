@@ -169,7 +169,70 @@ pub struct SymbolSummary {
     pub reach_entries: usize,
 }
 
+/// Every file that differs between the two revisions, with how, and the
+/// workspace package holding it.
+pub fn file_changes(
+    root: &std::path::Path,
+    base: &crate::rev::Rev,
+    head: &crate::rev::Rev,
+    base_ws: &crate::workspace::Workspace,
+    head_ws: &crate::workspace::Workspace,
+) -> anyhow::Result<Vec<FileChange>> {
+    Ok(crate::origin::changed_file_statuses(root, base, head)?
+        .into_iter()
+        .map(|st| FileChange {
+            package: head_ws
+                .owning_package(&st.path)
+                .or_else(|| base_ws.owning_package(&st.path))
+                .and_then(|p| p.name.clone()),
+            path: st.path.to_string_lossy().into_owned(),
+            change: match st.status {
+                'A' | 'C' => FileChangeKind::Added,
+                'D' => FileChangeKind::Deleted,
+                'R' => FileChangeKind::Renamed,
+                _ => FileChangeKind::Modified,
+            },
+            previous_path: st.from.map(|p| p.to_string_lossy().into_owned()),
+        })
+        .collect())
+}
+
 impl PlanReport {
+    /// A plan for a diff that changes no function — docs, config, SQL,
+    /// another language: just its files, so `assess` can still judge them
+    /// (a migration, a rule on added lines).
+    pub fn files_only(
+        base: String,
+        head: Option<String>,
+        files: Vec<FileChange>,
+        limits: Limits,
+    ) -> PlanReport {
+        let files_without_function_changes = files.len();
+        PlanReport {
+            version: PLAN_VERSION,
+            base,
+            head,
+            files,
+            functions: Vec::new(),
+            calls: Vec::new(),
+            summary: Summary {
+                changed: ChangeCounts {
+                    files_without_function_changes,
+                    ..ChangeCounts::default()
+                },
+                reach: Reach {
+                    functions: 0,
+                    files: 0,
+                    packages: Vec::new(),
+                    entries: BTreeMap::new(),
+                },
+                symbols: Vec::new(),
+            },
+            truncated: false,
+            limits,
+        }
+    }
+
     pub fn function(&self, id: &str) -> Option<&Function> {
         self.functions.iter().find(|f| f.id == id)
     }
@@ -317,5 +380,32 @@ impl PlanReport {
             )));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plan_with_no_function_changes_lists_its_files() {
+        let files = vec![FileChange {
+            path: "db/migrations/2_drop.sql".into(),
+            change: FileChangeKind::Added,
+            previous_path: None,
+            package: None,
+        }];
+        let plan = PlanReport::files_only("abc".into(), None, files, Limits { hops: 12, nodes: 0 });
+        assert_eq!(plan.version, PLAN_VERSION);
+        assert_eq!(plan.summary.changed.files_without_function_changes, 1);
+        assert!(plan.functions.is_empty() && plan.calls.is_empty());
+        let text = plan.to_text();
+        assert!(
+            text.contains("Other changed files: 1") && text.contains("0 to change"),
+            "{text}"
+        );
+        let back: PlanReport =
+            serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
+        assert_eq!(back.files.len(), 1);
     }
 }

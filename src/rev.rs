@@ -225,6 +225,61 @@ fn git_listed(root: &Path) -> Option<Vec<PathBuf>> {
     )
 }
 
+/// Where extracted commit trees are kept between runs: one directory
+/// per full sha under the system temp directory.
+pub fn cache_dir() -> PathBuf {
+    std::env::temp_dir().join("prognost-cache")
+}
+
+/// (trees, bytes) in the cache.
+pub fn cache_usage() -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(cache_dir()) else {
+        return (0, 0);
+    };
+    let mut trees = 0;
+    let mut bytes = 0;
+    for e in entries.flatten() {
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            trees += 1;
+            bytes += dir_size(&e.path());
+        }
+    }
+    (trees, bytes)
+}
+
+/// Removes every extracted tree; they are rebuilt from git on the next
+/// run that needs one. Returns (trees, bytes) removed.
+pub fn clean_cache() -> std::io::Result<(usize, u64)> {
+    let usage = cache_usage();
+    match std::fs::remove_dir_all(cache_dir()) {
+        Ok(()) => Ok(usage),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((0, 0)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Bytes under `dir`, not following symlinks.
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Ok(meta) = e.path().symlink_metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(e.path());
+            } else {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
 /// A commit's tree, materialized once per machine: keyed by the full
 /// sha under the temp dir and kept after the run, so the next launch on
 /// the same revisions skips the archive+untar of the whole repository
@@ -239,7 +294,7 @@ fn extract(root: &Path, sha: &str) -> Option<PathBuf> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())?;
-    let dir = std::env::temp_dir().join("prognost-cache").join(&full);
+    let dir = cache_dir().join(&full);
     let marker = dir.join(".complete");
     if marker.is_file() {
         return Some(dir);

@@ -45,20 +45,34 @@ under `.route('/api/v1/orders', …)`) is built in.
 
 ## What it analyses
 
-- TypeScript and JavaScript (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`,
-  `.mjs`, `.cjs`) and the `<script>` blocks of Svelte components.
-- Workspaces declared by `pnpm-workspace.yaml` or `package.json`
-  `workspaces`; imports through relative paths, package names, barrels
-  (`export * from`) and tsconfig `paths`.
-- HTTP calls made through Hono's typed client, and the seams above.
+| | | |
+|---|---|---|
+| **Languages** | TypeScript, JavaScript (`.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs`) | ✅ functions, calls, imports |
+| | Svelte components (`.svelte`) | ✅ the `<script>` blocks; markup is not parsed |
+| | Vue single-file components, Angular templates | ❌ the files appear in `plan`, their calls are not followed |
+| | Any other language | ❌ the files appear in `plan`, their calls are not followed |
+| **Modules** | relative imports, package names, barrels (`export * from`), tsconfig `paths` | ✅ |
+| | CommonJS `require` | ◐ files that `require` a module count as importing it; calls through the binding are not resolved |
+| **Workspaces** | pnpm (`pnpm-workspace.yaml`), npm and yarn (`package.json` `workspaces`) | ✅ |
+| | a single package | ✅ |
+| **Across HTTP** | Hono's typed client (`client.api.….$post`) → its routes | ✅ |
+| | `fetch`, axios, other clients | ➖ add a [seam](#seams-calls-joined-by-a-string) |
+| **Across strings** | events, queues, job names, DI tokens | ➖ add a [seam](#seams-calls-joined-by-a-string) |
+| **Risk rules** | call graph (public API, reach), TypeScript (await in loops), PostgreSQL migrations | ✅ built in |
+| | anything else | ➖ your own `[[risk]]` rules, or another analyser's SARIF |
+| **Platforms** | macOS, Linux | ✅ tested in CI |
+| | Windows | ❔ untested; the editor key and commit extraction call `sh` and `tar` |
 
-Everything else in a diff — other languages, SQL, config — still appears in
-`plan` as a changed file, and SQL migrations are read by the PostgreSQL
-rules, but no calls are followed through it. The call graph is inferred:
-dynamic dispatch, dependency injection and callbacks handed through
-untyped values can hide an edge, so reach is a lower bound.
+✅ supported · ◐ partly · ➖ through configuration · ❌ not supported · ❔ unknown
+
+Everything a diff touches appears in `plan` as a changed file, whether or
+not calls are followed through it, and `assess` still applies line and SQL
+rules to it.
 
 ## Caches
 
 Each commit's tree is extracted once into `$TMPDIR/prognost-cache/<sha>`
-and reused on later runs. It is safe to delete.
+and reused on later runs; on a large repository that grows by the size of
+the checkout per commit looked at. `prognost cache` shows where it is and
+how much it takes, and `prognost cache clean` removes it — trees are
+extracted again when next needed.

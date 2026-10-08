@@ -54,6 +54,9 @@ buttons to fold a package into files, directories or one node. "hops from
 the change" limits how far upstream is drawn; "focus the change" and "fit
 everything" frame the view. Drag to pan, ⌘/Ctrl + wheel to zoom.
 
+The page carries the diffs it shows — source code of every changed file.
+Share it the way you would share that code.
+
 ## serve: seen marks and GitHub's Viewed
 
 `prognost serve` serves the same page with a small API behind it, so what
@@ -68,6 +71,10 @@ you mark is kept:
   is the open one containing the head commit, or `--pr <number>`.
 
 The terminal graph does the same with `v`, `S` and `P`.
+
+The page's API has no authentication and acts with your `gh` login, so
+`serve` only listens on this machine (`127.0.0.1`, `localhost`, `::1`).
+Another address needs `--expose`.
 
 ## Inside herdr
 
