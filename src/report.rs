@@ -23,7 +23,7 @@ pub struct Row {
     pub depth: usize,
     pub base_range: Option<(u32, u32)>,
     pub head_range: Option<(u32, u32)>,
-    /// The line a `hide`/report jump should land on: HEAD's, or BASE's
+    /// The line a jump to this row should land on: HEAD's, or BASE's
     /// when the node only exists there.
     pub source_line: u32,
     pub details: Vec<CallChange>,
