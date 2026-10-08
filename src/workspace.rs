@@ -1,8 +1,9 @@
-//! Discovers the JS/TS packages in a repo and what each one depends on.
+//! Discovers the packages in a repo and what each one depends on: JS/TS
+//! packages by their package.json, Go packages (one per directory) under
+//! each go.mod, Python projects by their pyproject.toml or setup.py.
 //!
-//! This is the "package.json deps" half of the coarse layer: cheap to build
-//! (no source scanning), and used to narrow which packages are worth
-//! scanning for import statements at all.
+//! This is the "declared deps" half of the coarse layer, used to narrow
+//! which packages are worth scanning for import statements at all.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -11,9 +12,33 @@ use serde::Deserialize;
 
 use crate::rev::Rev;
 
+/// Which ecosystem a package belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageKind {
+    Js,
+    Go,
+    Python,
+}
+
+impl PackageKind {
+    /// The kind whose packages own a source file with this path, `None`
+    /// for anything that isn't Go or Python source (TypeScript, and
+    /// non-source files, which any kind may own).
+    fn of_source(file: &Path) -> Option<PackageKind> {
+        match file.extension().and_then(|e| e.to_str()) {
+            Some("go") => Some(PackageKind::Go),
+            Some("py" | "pyi") => Some(PackageKind::Python),
+            Some(e) if crate::imports::RESOLVABLE_EXTENSIONS.contains(&e) => Some(PackageKind::Js),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Package {
-    /// The `name` field in package.json, when it has one.
+    pub kind: PackageKind,
+    /// The `name` field in package.json, a Go package's import path, a
+    /// Python project's name.
     pub name: Option<String>,
     /// Repo-relative directory this package lives in.
     pub dir: PathBuf,
@@ -34,12 +59,31 @@ pub struct Workspace {
 
 impl Workspace {
     /// The package a file belongs to: the nearest ancestor directory that
-    /// holds a package.json among the discovered packages.
+    /// holds a package among the discovered packages — one of the
+    /// source file's own kind when there is one (a TypeScript file in a
+    /// Go module's tree belongs to its package.json, not the module).
     pub fn owning_package(&self, file: &Path) -> Option<&Package> {
+        // Reversed, so that of two packages in one directory (a
+        // package.json beside a go.mod) the first discovered wins.
+        let deepest = |kind: Option<PackageKind>| {
+            self.packages
+                .iter()
+                .rev()
+                .filter(|p| kind.is_none_or(|k| p.kind == k))
+                .filter(|p| file.starts_with(&p.dir))
+                .max_by_key(|p| p.dir.components().count())
+        };
+        match PackageKind::of_source(file) {
+            Some(kind) => deepest(Some(kind)).or_else(|| deepest(None)),
+            None => deepest(None),
+        }
+    }
+
+    /// The package of this kind named `name`.
+    pub fn package_of_kind(&self, kind: PackageKind, name: &str) -> Option<&Package> {
         self.packages
             .iter()
-            .filter(|p| file.starts_with(&p.dir))
-            .max_by_key(|p| p.dir.components().count())
+            .find(|p| p.kind == kind && p.name.as_deref() == Some(name))
     }
 
     pub fn package_by_name(&self, name: &str) -> Option<&Package> {
@@ -107,13 +151,179 @@ pub fn discover(root: &Path, rev: &Rev) -> anyhow::Result<Workspace> {
         deps.extend(pkg.dev_dependencies.into_keys());
         deps.extend(pkg.peer_dependencies.into_keys());
         packages.push(Package {
+            kind: PackageKind::Js,
             name: pkg.name,
             dir,
             deps,
             entries,
         });
     }
+    packages.extend(go_packages(root, rev, &all_files));
+    packages.extend(python_packages(root, rev, &all_files));
     Ok(Workspace { packages })
+}
+
+/// A directory no package scan should enter.
+fn skipped(file: &Path) -> bool {
+    file.components().any(|c| {
+        let s = c.as_os_str().to_string_lossy();
+        matches!(
+            s.as_ref(),
+            "vendor" | "testdata" | "node_modules" | "__pycache__" | "site-packages"
+        ) || (s.starts_with('.') && s.len() > 1)
+    })
+}
+
+/// One package per directory of non-test `.go` files under a `go.mod`,
+/// named by its import path; its deps are the import paths its files
+/// name. A nested module owns its own tree.
+fn go_packages(root: &Path, rev: &Rev, all_files: &[PathBuf]) -> Vec<Package> {
+    let mut modules: Vec<(PathBuf, String)> = all_files
+        .iter()
+        .filter(|f| f.file_name().is_some_and(|n| n == "go.mod") && !skipped(f))
+        .filter_map(|f| {
+            let dir = f.parent()?.to_path_buf();
+            let module = crate::golang::module_path(&rev.read(root, f)?)?;
+            Some((dir, module))
+        })
+        .collect();
+    if modules.is_empty() {
+        return Vec::new();
+    }
+    modules.sort_by_key(|(d, _)| std::cmp::Reverse(d.components().count()));
+    let mut by_dir: std::collections::BTreeMap<PathBuf, HashSet<String>> = Default::default();
+    for f in all_files {
+        let name = f
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        if !name.ends_with(".go") || name.ends_with("_test.go") || skipped(f) {
+            continue;
+        }
+        let dir = f.parent().unwrap_or(Path::new("")).to_path_buf();
+        let deps = by_dir.entry(dir).or_default();
+        if let Some(src) = rev.read(root, f) {
+            deps.extend(crate::golang::import_specs(&src));
+        }
+    }
+    by_dir
+        .into_iter()
+        .filter_map(|(dir, deps)| {
+            let (mdir, module) = modules.iter().find(|(m, _)| dir.starts_with(m))?;
+            let rel = dir.strip_prefix(mdir).ok()?;
+            let name = if rel.as_os_str().is_empty() {
+                module.clone()
+            } else {
+                format!("{module}/{}", rel.to_string_lossy().replace('\\', "/"))
+            };
+            Some(Package {
+                kind: PackageKind::Go,
+                name: Some(name),
+                dir,
+                deps,
+                entries: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Deserialize, Default)]
+struct PyProject {
+    project: Option<PyProjectTable>,
+    tool: Option<PyTool>,
+}
+
+#[derive(Deserialize, Default)]
+struct PyProjectTable {
+    name: Option<String>,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct PyTool {
+    poetry: Option<PoetryTable>,
+}
+
+#[derive(Deserialize, Default)]
+struct PoetryTable {
+    name: Option<String>,
+    #[serde(default)]
+    dependencies: std::collections::HashMap<String, toml::Value>,
+}
+
+/// A distribution name as declared, without its extras: `shop-db[pg]`
+/// → `shop-db`.
+fn normalize_dist(name: &str) -> String {
+    name.trim()
+        .split('[')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// One package per `pyproject.toml` (or `setup.py`/`setup.cfg` without
+/// one), named by the project name; deps are the distributions it
+/// declares.
+fn python_packages(root: &Path, rev: &Rev, all_files: &[PathBuf]) -> Vec<Package> {
+    let mut dirs: Vec<PathBuf> = all_files
+        .iter()
+        .filter(|f| {
+            f.file_name()
+                .is_some_and(|n| n == "pyproject.toml" || n == "setup.py" || n == "setup.cfg")
+                && !skipped(f)
+        })
+        .filter_map(|f| f.parent().map(Path::to_path_buf))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    let dist_name = |dir: &Path| {
+        dir.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                root.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+    };
+    dirs.into_iter()
+        .map(|dir| {
+            let mut name = None;
+            let mut deps = HashSet::new();
+            if let Some(text) = rev.read(root, &dir.join("pyproject.toml"))
+                && let Ok(py) = toml::from_str::<PyProject>(&text)
+            {
+                if let Some(p) = py.project {
+                    name = p.name;
+                    for d in p.dependencies {
+                        let end = d
+                            .find(|c: char| !(c.is_alphanumeric() || "-_.".contains(c)))
+                            .unwrap_or(d.len());
+                        deps.insert(normalize_dist(&d[..end]));
+                    }
+                }
+                if let Some(poetry) = py.tool.and_then(|t| t.poetry) {
+                    name = name.or(poetry.name);
+                    deps.extend(
+                        poetry
+                            .dependencies
+                            .into_keys()
+                            .filter(|k| k != "python")
+                            .map(|k| normalize_dist(&k)),
+                    );
+                }
+            }
+            let name = normalize_dist(&name.unwrap_or_else(|| dist_name(&dir)));
+            Package {
+                kind: PackageKind::Python,
+                name: Some(name),
+                dir,
+                deps,
+                entries: Vec::new(),
+            }
+        })
+        .collect()
 }
 
 /// Where a bare `import "<this package>"` lands, repo-relative. `exports`
@@ -233,12 +443,14 @@ mod tests {
         let ws = Workspace {
             packages: vec![
                 Package {
+                    kind: PackageKind::Js,
                     name: Some("root".into()),
                     dir: PathBuf::from(""),
                     deps: HashSet::new(),
                     entries: vec![],
                 },
                 Package {
+                    kind: PackageKind::Js,
                     name: Some("nested".into()),
                     dir: PathBuf::from("packages/backend/db-pool"),
                     deps: HashSet::new(),

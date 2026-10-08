@@ -49,16 +49,25 @@ under `.route('/api/v1/orders', …)`) is built in.
 |---|---|---|
 | **Languages** | TypeScript, JavaScript (`.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs`) | ✅ functions, calls, imports |
 | | Svelte components (`.svelte`) | ✅ the `<script>` blocks; markup is not parsed |
+| | Go (`.go`) | ✅ functions, methods, function literals, calls, imports |
+| | Python (`.py`) | ✅ functions, methods, lambdas, calls, imports |
 | | Vue single-file components, Angular templates | ❌ the files appear in `plan`, their calls are not followed |
 | | Any other language | ❌ the files appear in `plan`, their calls are not followed |
-| **Modules** | relative imports, package names, barrels (`export * from`), tsconfig `paths` | ✅ |
-| | CommonJS `require` | ◐ files that `require` a module count as importing it; calls through the binding are not resolved |
+| **Modules** | TypeScript: relative imports, package names, barrels (`export * from`), tsconfig `paths` | ✅ |
+| | TypeScript: CommonJS `require` | ◐ files that `require` a module count as importing it; calls through the binding are not resolved |
+| | Go: packages of the repository's modules; calls within a package across its files | ✅ |
+| | Go: methods (`s.pool.Query`) | ◐ found in the caller's own package, else in the one package it imports that defines a method of that name; interfaces are not followed |
+| | Python: absolute and relative imports, `__init__.py` re-exports, `src/` layouts | ✅ |
+| | Python: methods on instances (`repo.save()`) | ◐ only when the calling file itself defines a method of that name |
 | **Workspaces** | pnpm (`pnpm-workspace.yaml`), npm and yarn (`package.json` `workspaces`) | ✅ |
+| | Go modules (`go.mod`, several per repository) | ✅ each package is its directory |
+| | Python projects (`pyproject.toml`, `setup.py`) | ✅ |
 | | a single package | ✅ |
+| **Routes** | Hono, Go `HandleFunc`/`Get`/`Post`… with a function literal, Python `@app.get(…)`/`@router.post(…)`/`@bp.route(…)` | ✅ named by method and path |
 | **Across HTTP** | Hono's typed client (`client.api.….$post`) → its routes | ✅ |
 | | `fetch`, axios, other clients | ➖ add a [seam](#seams-calls-joined-by-a-string) |
 | **Across strings** | events, queues, job names, DI tokens | ➖ add a [seam](#seams-calls-joined-by-a-string) |
-| **Risk rules** | call graph (public API, reach), TypeScript (await in loops), PostgreSQL migrations | ✅ built in |
+| **Risk rules** | call graph (public API, reach), TypeScript and Python (await in loops), Go (defer in loops), PostgreSQL migrations | ✅ built in |
 | | anything else | ➖ your own `[[risk]]` rules, or another analyser's SARIF |
 | **Platforms** | macOS, Linux | ✅ tested in CI |
 | | Windows | ❔ untested; the editor key and commit extraction call `sh` and `tar` |

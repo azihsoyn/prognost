@@ -4,6 +4,19 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Go: functions, methods and function literals; calls through the
+  packages of the repository's `go.mod` modules, within a package across
+  its files, and to methods; routes registered with a function literal.
+- Python: functions, methods and lambdas; calls through absolute and
+  relative imports and `__init__.py` re-exports; routes from decorators
+  (`@app.get`, `@router.post`, `@bp.route`).
+- Presets `go` (`defer-in-loop`) and `python` (`python-await-in-loop`),
+  on by default; `ast` rules take `language = "go"` or `"python"`.
+
 ## [0.1.0] - 2026-10-08
 
 ### Added

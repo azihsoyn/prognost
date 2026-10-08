@@ -8,7 +8,7 @@ presets and adds, replaces or turns off rules in its own `prognost.toml`
 one).
 
 ```toml
-presets = ["graph", "typescript", "postgres"]   # default: all presets
+presets = ["graph", "typescript", "go", "python", "postgres"]  # default: all
 disable = ["wide-reach"]                        # turn rules off by name
 
 [[risk]]                                        # a new rule
@@ -30,6 +30,8 @@ from; an invalid rule stops it with the reason.
 |---|---|
 | `graph` | `public-api-change`, `wide-reach`: from prognost's call graph, any language |
 | `typescript` | `await-in-loop`: TypeScript, JavaScript and the script of Svelte components |
+| `go` | `defer-in-loop`: a `defer` that runs once per iteration and waits for the function to return |
+| `python` | `python-await-in-loop`: an `await` once per iteration (not in `async for`) |
 | `postgres` | `migration-*`: PostgreSQL migrations |
 
 ## Fields every rule has
@@ -106,7 +108,12 @@ in the config replaces a preset set of the same name.
 ## kind = "ast"
 
 A [tree-sitter query](https://tree-sitter.github.io/tree-sitter/using-parsers/queries/)
-over TypeScript / JavaScript (and Svelte scripts).
+over one language's files, named by `language`: `typescript` (the
+default; JavaScript and Svelte scripts too), `go` or `python`. The node
+names are that language's grammar's
+([TypeScript](https://github.com/tree-sitter/tree-sitter-typescript),
+[Go](https://github.com/tree-sitter/tree-sitter-go),
+[Python](https://github.com/tree-sitter/tree-sitter-python)).
 
 - `query`: the query; the `@hit` capture (else a match's first capture)
   is the hit, reported when it starts on an added line.
@@ -114,7 +121,8 @@ over TypeScript / JavaScript (and Svelte scripts).
 - `filters`: built-in narrowing that a query alone cannot express:
   - `per-loop-iteration`: keep a hit only when it runs once per
     iteration of a loop in the same function (not in a nested callback,
-    a loop header, a `for await` body, or on the way out of the loop).
+    a loop header, a `for await` or `async for` body, or on the way out
+    of the loop).
     Establishes the fact `loop-stops-early` when the loop can `return`
     or `break`, for a variant's `when`.
 - Placeholder `{in_function}` as for `line`.

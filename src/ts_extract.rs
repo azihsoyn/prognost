@@ -379,7 +379,7 @@ fn text(node: Node, src: &[u8]) -> String {
 /// or a shifted line number does not break a match. Hand-rolled rather
 /// than `DefaultHasher` so the fingerprint is fixed forever, independent
 /// of the standard library's own hasher.
-fn normalized_hash(bytes: &[u8]) -> u64 {
+pub(crate) fn normalized_hash(bytes: &[u8]) -> u64 {
     const OFFSET: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
     let mut h = OFFSET;

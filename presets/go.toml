@@ -1,0 +1,10 @@
+# Go.
+
+[[risk]]
+name = "defer-in-loop"
+kind = "ast"
+language = "go"
+query = "(defer_statement) @hit"
+filters = ["per-loop-iteration"]
+severity = "medium"
+title = "new defer inside a loop{in_function}: runs only when the function returns, so what it releases piles up across iterations"

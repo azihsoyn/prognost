@@ -13,7 +13,7 @@
   <a href="https://github.com/azihsoyn/prognost/actions/workflows/ci.yml"><img src="https://github.com/azihsoyn/prognost/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue" alt="License: MIT or Apache-2.0"></a>
   <img src="https://img.shields.io/badge/status-early-orange" alt="Status: early">
-  <img src="https://img.shields.io/badge/analyses-TypeScript-3178c6" alt="Analyses TypeScript">
+  <img src="https://img.shields.io/badge/analyses-TypeScript%20%C2%B7%20Go%20%C2%B7%20Python-3178c6" alt="Analyses TypeScript, Go and Python">
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@ A diff is a diagnosis: it says what changed. It doesn't say what follows —
 the route three packages away that now waits on a new drain loop, the worker
 that started querying once per invoice, the migration that rewrites a busy
 table. **prognost** gives the prognosis. It reads both revisions of a
-TypeScript codebase, works out which functions really changed, follows
+TypeScript, Go or Python codebase, works out which functions really changed, follows
 everything that calls them up to the entry points, and checks that reach
 against rules — statically, deterministically, without running anything.
 
@@ -143,8 +143,8 @@ Assessment: 3 high, 1 medium, 2 low.
 
 Each finding names the rule, the place (`file:line`) and the line itself.
 `plan` and `assess` are two steps on purpose, the way `terraform plan` and a
-policy check are. Rules are data: presets for the call graph, TypeScript
-and PostgreSQL migrations ship built in, and a repository adds, replaces or
+policy check are. Rules are data: presets for the call graph, TypeScript,
+Go, Python and PostgreSQL migrations ship built in, and a repository adds, replaces or
 turns off rules in its `prognost.toml`. `--sarif` folds in other analysers'
 results on the lines the diff added, and `--fail-on high` makes it a CI
 gate. See [docs/rules.md](docs/rules.md).
@@ -157,9 +157,10 @@ gate. See [docs/rules.md](docs/rules.md).
    first: exact name, then identical normalized body, then position under
    an already-matched parent. A function that only moved lines is the same
    node; one whose body changed is *changed*.
-3. Calls are resolved across files through imports, barrels, workspace
-   packages and tsconfig paths, and across the HTTP boundary through Hono's
-   typed client. A repository adds its own string-keyed seams (an event
+3. Calls are resolved across files through imports: barrels, workspace
+   packages and tsconfig paths in TypeScript, module packages in Go,
+   relative imports and `__init__.py` in Python — and across the HTTP
+   boundary through Hono's typed client. A repository adds its own string-keyed seams (an event
    name, a queue) in `prognost.toml`.
 4. From each changed function, callers are followed up to the entry points:
    routes, components, module code, exports nothing calls.
@@ -174,16 +175,25 @@ never a proof that something else is safe. What it reads is listed below.
 |---|---|---|
 | **Languages** | TypeScript, JavaScript (`.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs`) | ✅ functions, calls, imports |
 | | Svelte components (`.svelte`) | ✅ the `<script>` blocks; markup is not parsed |
+| | Go (`.go`) | ✅ functions, methods, function literals, calls, imports |
+| | Python (`.py`) | ✅ functions, methods, lambdas, calls, imports |
 | | Vue single-file components, Angular templates | ❌ the files appear in `plan`, their calls are not followed |
 | | Any other language | ❌ the files appear in `plan`, their calls are not followed |
-| **Modules** | relative imports, package names, barrels (`export * from`), tsconfig `paths` | ✅ |
-| | CommonJS `require` | ◐ files that `require` a module count as importing it; calls through the binding are not resolved |
+| **Modules** | TypeScript: relative imports, package names, barrels (`export * from`), tsconfig `paths` | ✅ |
+| | TypeScript: CommonJS `require` | ◐ files that `require` a module count as importing it; calls through the binding are not resolved |
+| | Go: packages of the repository's modules; calls within a package across its files | ✅ |
+| | Go: methods (`s.pool.Query`) | ◐ found in the caller's own package, else in the one package it imports that defines a method of that name; interfaces are not followed |
+| | Python: absolute and relative imports, `__init__.py` re-exports, `src/` layouts | ✅ |
+| | Python: methods on instances (`repo.save()`) | ◐ only when the calling file itself defines a method of that name |
 | **Workspaces** | pnpm (`pnpm-workspace.yaml`), npm and yarn (`package.json` `workspaces`) | ✅ |
+| | Go modules (`go.mod`, several per repository) | ✅ each package is its directory |
+| | Python projects (`pyproject.toml`, `setup.py`) | ✅ |
 | | a single package | ✅ |
+| **Routes** | Hono, Go `HandleFunc`/`Get`/`Post`… with a function literal, Python `@app.get(…)`/`@router.post(…)`/`@bp.route(…)` | ✅ named by method and path |
 | **Across HTTP** | Hono's typed client (`client.api.….$post`) → its routes | ✅ |
 | | `fetch`, axios, other clients | ➖ add a [seam](docs/config.md#seams-calls-joined-by-a-string) |
 | **Across strings** | events, queues, job names, DI tokens | ➖ add a [seam](docs/config.md#seams-calls-joined-by-a-string) |
-| **Risk rules** | call graph (public API, reach), TypeScript (await in loops), PostgreSQL migrations | ✅ built in |
+| **Risk rules** | call graph (public API, reach), TypeScript and Python (await in loops), Go (defer in loops), PostgreSQL migrations | ✅ built in |
 | | anything else | ➖ your own `[[risk]]` rules, or another analyser's SARIF |
 | **Platforms** | macOS, Linux | ✅ tested in CI |
 | | Windows | ❔ untested; the editor key and commit extraction call `sh` and `tar` |

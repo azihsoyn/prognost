@@ -30,9 +30,10 @@ use crate::align::{self, Alignment};
 use crate::file_hub;
 use crate::graph::Direction as ImportDirection;
 use crate::hub::{self, Status};
+use crate::lang::Lang;
 use crate::package_hub;
 use crate::rev::Rev;
-use crate::ts_extract::{self, TsFunction};
+use crate::ts_extract::TsFunction;
 use crate::workspace::Workspace;
 
 /// Columns size themselves to their longest label, within these bounds
@@ -639,17 +640,26 @@ impl App {
     /// Whether `label` in `file` is visible to another file at all —
     /// only a top-level, exported binding can be imported, so only those
     /// are worth following into the files that import `file`.
+    ///
+    /// In Go every top-level function and method is reachable from the
+    /// package's other files; in Python every top-level `def` can be
+    /// imported, underscore or not.
     fn is_importable(&self, file: &std::path::Path, label: &str) -> bool {
+        let visible: fn(&TsFunction) -> bool = match Lang::of(file) {
+            Some(Lang::Go) => |f| f.parent.is_none(),
+            Some(Lang::Python) => |f| f.parent.is_none() && !f.method,
+            _ => |f| f.parent.is_none() && f.exported,
+        };
         self.function_files.get(file).is_some_and(|entry| {
             entry
                 .head_fns
                 .iter()
-                .any(|f| align::label(f) == label && f.parent.is_none() && f.exported)
+                .any(|f| align::label(f) == label && visible(f))
                 || entry
                     .base_fns
                     .iter()
                     .enumerate()
-                    .any(|(i, f)| base_label(entry, i) == label && f.parent.is_none() && f.exported)
+                    .any(|(i, f)| base_label(entry, i) == label && visible(f))
         })
     }
 
@@ -974,6 +984,18 @@ impl App {
             ] {
                 let g = crate::graph::reach(&self.root, rev, src, ImportDirection::Callers, ws);
                 importer_paths.extend(g.nodes.into_iter().map(|n| n.path));
+            }
+        }
+        // A Go package's files call each other's functions unqualified,
+        // with no import between them.
+        if Lang::of(file) == Some(Lang::Go) {
+            let dir = file.parent().unwrap_or(std::path::Path::new(""));
+            for rev in [&self.base_rev, &self.head_rev] {
+                importer_paths.extend(
+                    crate::golang::package_files(dir, &self.root, rev)
+                        .into_iter()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                );
             }
         }
         importer_paths.remove(&file.to_string_lossy().into_owned());
@@ -1310,11 +1332,8 @@ impl App {
         files
             .into_iter()
             .filter(|f| {
-                f.extension().is_some_and(|e| {
-                    crate::imports::RESOLVABLE_EXTENSIONS
-                        .iter()
-                        .any(|x| *x == e)
-                })
+                f.extension()
+                    .is_some_and(|e| crate::lang::SOURCE_EXTENSIONS.iter().any(|x| *x == e))
             })
             .filter(|f| !is_test_file(f))
             .collect()
@@ -1564,6 +1583,9 @@ impl App {
         let head = label.split('(').next().unwrap_or(&label);
         let segments: Vec<&str> = head.split('.').collect();
         let root = *segments.first()?;
+        if Lang::of(&file) == Some(Lang::Go) {
+            return self.resolve_go(&file, &label, &segments, status);
+        }
         // `target.findChangedByValidStarts(…)` where `target` is a local
         // (a parameter, a strategy object) and the file itself defines
         // a method of that name: that method is the callee — all of
@@ -1586,10 +1608,34 @@ impl App {
         let entry_file = self.resolve_spec(&import.specifier, &file);
         let pkg = match &entry_file {
             Some(f) => self.file_label(f),
-            None => crate::bindings::package_name(&import.specifier),
+            None => crate::lang::package_name(&file, &import.specifier),
         };
         let plain_chain = head.len() == label.len();
         let mut reached: Option<PathBuf> = None;
+        // Python: `pool.query` after `from shop.db import pool`, or
+        // `shop.db.pool.query` after `import shop.db.pool` — the chain
+        // names modules down to the function.
+        if Lang::of(&file) == Some(Lang::Python) && plain_chain && segments.len() >= 2 {
+            let mut module = match &import.binding {
+                crate::bindings::Binding::Named(n) => crate::python::join(&import.specifier, n),
+                _ => import.specifier.clone(),
+            };
+            for seg in &segments[1..segments.len() - 1] {
+                module = crate::python::join(&module, seg);
+            }
+            let last = segments[segments.len() - 1];
+            if let Some(f) = self.resolve_spec(&module, &file) {
+                if self.ensure_function_file(&f) && self.is_importable(&f, last) {
+                    return Some((make_fn_id(&f, last), last.to_string(), status, true));
+                }
+                if let Some(d) = self.resolve_import(&f, last) {
+                    return Some((make_fn_id(&d, last), last.to_string(), status, true));
+                }
+                if self.exports_textually(&f, last) {
+                    reached = Some(f);
+                }
+            }
+        }
         let target: Option<(PathBuf, String)> = match (&import.binding, entry_file) {
             (crate::bindings::Binding::Named(imported), Some(f))
                 if plain_chain && segments.len() == 1 =>
@@ -1663,16 +1709,121 @@ impl App {
         Some((new_id, shown, status, false))
     }
 
+    /// [`resolve_fragment`] for a call made in a Go file. `pkg.F` is
+    /// the function `F` in the package `pkg` imports, found among its
+    /// files; a bare `f` is a function elsewhere in the caller's own
+    /// package; `x.M` on anything not imported is a method `M` of the
+    /// caller's package. A package outside the repository becomes one
+    /// `pkg::` node per function, by its import path.
+    fn resolve_go(
+        &mut self,
+        file: &std::path::Path,
+        label: &str,
+        segments: &[&str],
+        status: Status,
+    ) -> Option<Fragment> {
+        let plain = !label.contains('(');
+        let last = *segments.last()?;
+        let own_dir = file
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_path_buf();
+        let import = (segments.len() >= 2)
+            .then(|| self.bindings_of(file).get(segments[0]).cloned())
+            .flatten();
+        let Some(import) = import else {
+            let method = segments.len() >= 2;
+            if !plain {
+                return None;
+            }
+            if let Some(f) = self.go_package_function(&own_dir, last, method) {
+                return Some((make_fn_id(&f, last), last.to_string(), status, true));
+            }
+            if !method {
+                return None;
+            }
+            // A method on a value whose type the file got from a
+            // package it imports (`s.pool.Query` with `pool *db.Pool`):
+            // taken when exactly one imported package has a method of
+            // that name.
+            let mut specs: Vec<String> = self
+                .bindings_of(file)
+                .values()
+                .map(|i| i.specifier.clone())
+                .collect();
+            specs.sort();
+            specs.dedup();
+            let mut hits = Vec::new();
+            for spec in specs {
+                let dir = crate::golang::resolve(&spec, &self.head_ws)
+                    .or_else(|| crate::golang::resolve(&spec, &self.base_ws));
+                if let Some(dir) = dir
+                    && let Some(f) = self.go_package_function(&dir, last, true)
+                {
+                    hits.push(f);
+                }
+            }
+            return match hits.as_slice() {
+                [f] => Some((make_fn_id(f, last), last.to_string(), status, true)),
+                _ => None,
+            };
+        };
+        let dir = crate::golang::resolve(&import.specifier, &self.head_ws)
+            .or_else(|| crate::golang::resolve(&import.specifier, &self.base_ws));
+        if let Some(dir) = &dir
+            && plain
+            && segments.len() == 2
+            && let Some(f) = self.go_package_function(dir, last, false)
+        {
+            return Some((make_fn_id(&f, last), last.to_string(), status, true));
+        }
+        let rest = label
+            .strip_prefix(segments[0])
+            .and_then(|r| r.strip_prefix('.'))
+            .unwrap_or(label)
+            .to_string();
+        let new_id = format!("pkg::{}::{rest}", import.specifier);
+        self.call_text
+            .entry(new_id.clone())
+            .or_insert(label.to_string());
+        Some((new_id, rest, status, false))
+    }
+
+    /// The file of the Go package in `dir` (either revision) that
+    /// defines a top-level function — or, with `method`, a method —
+    /// named `name`.
+    fn go_package_function(
+        &mut self,
+        dir: &std::path::Path,
+        name: &str,
+        method: bool,
+    ) -> Option<PathBuf> {
+        let mut files: Vec<PathBuf> = [&self.head_rev, &self.base_rev]
+            .into_iter()
+            .flat_map(|rev| crate::golang::package_files(dir, &self.root, rev))
+            .collect();
+        files.sort();
+        files.dedup();
+        files.into_iter().find(|f| {
+            self.exports_textually(f, name)
+                && self.ensure_function_file(f)
+                && self.function_files[f]
+                    .head_fns
+                    .iter()
+                    .chain(&self.function_files[f].base_fns)
+                    .any(|g| {
+                        g.parent.is_none() && g.method == method && g.name.as_deref() == Some(name)
+                    })
+        })
+    }
+
     /// Every source file of one revision (tests excluded).
     fn source_files(&self, rev: &Rev) -> Vec<PathBuf> {
         rev.list_files(&self.root)
             .into_iter()
             .filter(|f| {
-                f.extension().is_some_and(|e| {
-                    crate::imports::RESOLVABLE_EXTENSIONS
-                        .iter()
-                        .any(|x| *x == e)
-                })
+                f.extension()
+                    .is_some_and(|e| crate::lang::SOURCE_EXTENSIONS.iter().any(|x| *x == e))
             })
             .filter(|f| !is_test_file(f))
             .collect()
@@ -1696,19 +1847,31 @@ impl App {
             let Some(src) = rev.read(&self.root, &f) else {
                 continue;
             };
-            for (call, line) in crate::hono::rpc_calls_in(&src) {
+            let ts = Lang::of(&f) == Some(Lang::TypeScript);
+            // A package's `__init__.py` is Python's barrel: what it
+            // imports, it re-exports.
+            if f.file_name().is_some_and(|n| n == "__init__.py") {
+                for spec in crate::python::import_specs(&src) {
+                    scan.reexports.push((f.clone(), spec));
+                }
+            }
+            for (call, line) in ts
+                .then(|| crate::hono::rpc_calls_in(&src))
+                .into_iter()
+                .flatten()
+            {
                 scan.sites.push(RpcSite {
                     call,
                     file: f.clone(),
                     line,
                 });
             }
-            if src.contains(".route(") && f.extension().is_none_or(|e| e != "svelte") {
+            if ts && src.contains(".route(") && f.extension().is_none_or(|e| e != "svelte") {
                 for (prefix, binding) in crate::hono::mounts_in(&src) {
                     scan.mounts.push((f.clone(), prefix, binding));
                 }
             }
-            if src.contains("export") && src.contains(" from ") {
+            if ts && src.contains("export") && src.contains(" from ") {
                 for spec in crate::bindings::reexport_specs(&src) {
                     scan.reexports.push((f.clone(), spec));
                 }
@@ -1854,7 +2017,7 @@ impl App {
             let mut map = HashMap::new();
             for rev in [&self.base_rev, &self.head_rev] {
                 if let Some(src) = rev.read(&self.root, file) {
-                    map.extend(crate::bindings::bindings(&src));
+                    map.extend(crate::lang::bindings(file, &src));
                 }
             }
             self.bindings_cache.insert(file.to_path_buf(), map);
@@ -1866,7 +2029,9 @@ impl App {
         if !self.reexports_cache.contains_key(file) {
             let mut map = HashMap::new();
             for rev in [&self.base_rev, &self.head_rev] {
-                if let Some(src) = rev.read(&self.root, file) {
+                if let Some(src) = rev.read(&self.root, file)
+                    && Lang::of(file) == Some(Lang::TypeScript)
+                {
                     map.extend(crate::bindings::namespace_reexports(&src));
                 }
             }
@@ -1888,14 +2053,19 @@ impl App {
             return hit.clone();
         }
         let dir = self.root.join(&from_dir);
-        let tsconfig = crate::tsconfig::load_nearest(&self.root, &dir);
+        let tsconfig = match Lang::of(from_file) {
+            Some(Lang::Go | Lang::Python) => Default::default(),
+            _ => crate::tsconfig::load_nearest(&self.root, &dir),
+        };
         let found = [
             (&self.head_rev, &self.head_ws),
             (&self.base_rev, &self.base_ws),
         ]
         .into_iter()
         .find_map(|(rev, ws)| {
-            crate::resolve::resolve(spec, from_file, &self.root, rev, ws, &tsconfig)
+            crate::lang::resolve_files(spec, from_file, &self.root, rev, ws, &tsconfig)
+                .into_iter()
+                .next()
         });
         debug_log(&format!(
             "resolve_spec {spec} from {} -> {:?}",
@@ -1933,16 +2103,10 @@ impl App {
     /// for a parse of it: a barrel's sixty imports would otherwise each
     /// be parsed twice to find the one that defines the name.
     fn exports_textually(&self, file: &std::path::Path, name: &str) -> bool {
-        let pattern = regex::Regex::new(&format!(
-            r"\bexport\s+(?:default\s+)?(?:async\s+)?(?:const|let|var|function|class)\s+{}\b|\bexport\s+(?:const|let|var)?\s*\{{[^}}]*\b{}\b",
-            regex::escape(name),
-            regex::escape(name)
-        ))
-        .expect("export regex");
         [&self.head_rev, &self.base_rev]
             .into_iter()
             .filter_map(|rev| rev.read(&self.root, file))
-            .any(|src| pattern.is_match(&src))
+            .any(|src| crate::lang::defines_textually(file, &src, name))
     }
 
     /// The file among `file`'s imports that exports a top-level `label`.
@@ -5732,8 +5896,8 @@ fn parse_functions(
 ) -> Option<ParsedFunctions> {
     let base_src = base_rev.read(root, path).unwrap_or_default();
     let head_src = head_rev.read(root, path)?;
-    let base_fns = ts_extract::extract_for_path(path, &base_src).ok()?;
-    let head_fns = ts_extract::extract_for_path(path, &head_src).ok()?;
+    let base_fns = crate::lang::extract_for_path(path, &base_src).ok()?;
+    let head_fns = crate::lang::extract_for_path(path, &head_src).ok()?;
     let alignment = align::align(&base_fns, &head_fns);
     Some((base_fns, head_fns, alignment))
 }
@@ -5961,6 +6125,7 @@ fn is_test_file(p: &std::path::Path) -> bool {
         || s.contains("/tests/")
         || s.contains("/test/")
         || s.contains("/__tests__/")
+        || crate::lang::is_test_name(p)
 }
 
 fn basename(path: &str) -> &str {

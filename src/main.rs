@@ -5,7 +5,7 @@ use prognost::api;
 use prognost::origin;
 use prognost::report::{self, Kind, Row};
 use prognost::rev::Rev;
-use prognost::{align, flow_tui, html, repo, ts_extract, workspace};
+use prognost::{align, flow_tui, html, repo, workspace};
 
 const USAGE: &str = "\
 Read a code change's prognosis before it ships. Like `terraform plan`, for code:
@@ -535,8 +535,8 @@ fn run_compare(args: &[String], stage: Stage) -> Result<()> {
         );
     };
 
-    let base_fns = ts_extract::extract_for_path(&file, &base_src)?;
-    let head_fns = ts_extract::extract_for_path(&file, &head_src)?;
+    let base_fns = prognost::lang::extract_for_path(&file, &base_src)?;
+    let head_fns = prognost::lang::extract_for_path(&file, &head_src)?;
     let alignment = align::align(&base_fns, &head_fns);
     let report = report::build(&base_fns, &head_fns, &alignment);
 

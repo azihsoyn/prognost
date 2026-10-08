@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::resolve;
+use crate::lang::{self, Lang};
 use crate::rev::Rev;
 use crate::tsconfig;
-use crate::workspace::Workspace;
+use crate::workspace::{PackageKind, Workspace};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Node {
@@ -175,8 +175,19 @@ fn callers_of(root: &Path, rev: &Rev, target: &Path, workspace: &Workspace) -> G
     // package's entry. Files whose text has neither are skipped before
     // any specifier is resolved — resolution is the expensive part.
     let mut needles: Vec<String> = Vec::new();
+    let lang = Lang::of(target);
     if let Some(stem) = target.file_stem().and_then(|s| s.to_str()) {
-        needles.push(stem.split('.').next().unwrap_or(stem).to_string());
+        // A Go import names the directory; so does a Python one
+        // reaching a package's `__init__.py`.
+        let dir_named = lang == Some(Lang::Go) || stem == "__init__";
+        match target
+            .parent()
+            .and_then(|d| d.file_name())
+            .and_then(|d| d.to_str())
+        {
+            Some(dir) if dir_named => needles.push(dir.to_string()),
+            _ => needles.push(stem.split('.').next().unwrap_or(stem).to_string()),
+        }
     }
     if target_pkg.entries.iter().any(|e| e == target)
         && let Some(name) = &target_pkg.name
@@ -185,7 +196,10 @@ fn callers_of(root: &Path, rev: &Rev, target: &Path, workspace: &Workspace) -> G
     }
 
     for pkg in candidates {
-        let tsconfig = tsconfig::load_nearest(root, &root.join(&pkg.dir));
+        let tsconfig = match pkg.kind {
+            PackageKind::Js => tsconfig::load_nearest(root, &root.join(&pkg.dir)),
+            _ => Default::default(),
+        };
         for file in source_files(root, rev, &pkg.dir) {
             if file == target {
                 continue;
@@ -196,16 +210,12 @@ fn callers_of(root: &Path, rev: &Rev, target: &Path, workspace: &Workspace) -> G
             if !needles.iter().any(|n| text.contains(n.as_str())) {
                 continue;
             }
-            for spec in crate::imports::scan(&text) {
+            for spec in lang::import_specs(&file, &text) {
                 if !needles.iter().any(|n| spec.contains(n.as_str())) {
                     continue;
                 }
-                let Some(resolved) =
-                    resolve::resolve(&spec, &file, root, rev, workspace, &tsconfig)
-                else {
-                    continue;
-                };
-                if resolved == target {
+                let resolved = lang::resolve_files(&spec, &file, root, rev, workspace, &tsconfig);
+                if resolved.iter().any(|r| r == target) {
                     let group = group_for(root, &file, workspace);
                     let node = Node {
                         path: to_slash(&file),
@@ -233,27 +243,28 @@ fn dependencies_of(root: &Path, rev: &Rev, target: &Path, workspace: &Workspace)
     let Some(text) = rev.read(root, target) else {
         return g;
     };
-    let tsconfig = tsconfig::load_nearest(root, root.join(target).parent().unwrap_or(root));
+    let tsconfig = match Lang::of(target) {
+        Some(Lang::Go | Lang::Python) => Default::default(),
+        _ => tsconfig::load_nearest(root, root.join(target).parent().unwrap_or(root)),
+    };
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    for spec in crate::imports::scan(&text) {
-        let Some(resolved) = resolve::resolve(&spec, target, root, rev, workspace, &tsconfig)
-        else {
-            continue;
-        };
-        if !seen.insert(resolved.clone()) {
-            continue;
+    for spec in lang::import_specs(target, &text) {
+        for resolved in lang::resolve_files(&spec, target, root, rev, workspace, &tsconfig) {
+            if !seen.insert(resolved.clone()) {
+                continue;
+            }
+            let group = group_for(root, &resolved, workspace);
+            g.groups_push_unique(group.clone());
+            g.nodes.push(Node {
+                path: to_slash(&resolved),
+                group: group.dir,
+                origin: false,
+            });
+            g.edges.push(Edge {
+                from: to_slash(target),
+                to: to_slash(&resolved),
+            });
         }
-        let group = group_for(root, &resolved, workspace);
-        g.groups_push_unique(group.clone());
-        g.nodes.push(Node {
-            path: to_slash(&resolved),
-            group: group.dir,
-            origin: false,
-        });
-        g.edges.push(Edge {
-            from: to_slash(target),
-            to: to_slash(&resolved),
-        });
     }
     g
 }
@@ -274,7 +285,7 @@ fn group_for(_root: &Path, file: &Path, workspace: &Workspace) -> Group {
     }
 }
 
-/// Every JS/TS source file under a package directory, skipping the
+/// Every source file under a package directory, skipping the
 /// directories a coarse scan has no business entering.
 fn source_files(root: &Path, rev: &Rev, pkg_dir: &Path) -> Vec<PathBuf> {
     rev.files_under(root, pkg_dir)
@@ -290,9 +301,10 @@ fn source_files(root: &Path, rev: &Rev, pkg_dir: &Path) -> Vec<PathBuf> {
                 .file_name()
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default();
-            crate::imports::RESOLVABLE_EXTENSIONS
+            lang::SOURCE_EXTENSIONS
                 .iter()
                 .any(|ext| f.extension().is_some_and(|e| e == *ext))
+                && !lang::is_test_name(f)
                 && !name.ends_with(".spec.ts")
                 && !name.ends_with(".test.ts")
                 && !name.ends_with(".spec.tsx")

@@ -62,7 +62,36 @@ pub fn added_lines(base: &str, head: &str) -> HashSet<u32> {
     out
 }
 
-const EXITS: &[&str] = &["return_statement", "break_statement", "throw_statement"];
+// The node kinds below are the TypeScript, Go and Python grammars'
+// together; no kind means one thing in one grammar and another in the
+// next.
+const EXITS: &[&str] = &[
+    "return_statement",
+    "break_statement",
+    "throw_statement",
+    "raise_statement",
+];
+
+const LOOPS: &[&str] = &[
+    "for_statement",
+    "for_in_statement",
+    "while_statement",
+    "do_statement",
+];
+
+/// Where a `break` leaves the construct, not the loop around it.
+const BREAK_TARGETS: &[&str] = &[
+    "for_statement",
+    "for_in_statement",
+    "while_statement",
+    "do_statement",
+    "switch_statement",
+    "expression_switch_statement",
+    "type_switch_statement",
+    "select_statement",
+];
+
+const BLOCKS: &[&str] = &["statement_block", "block", "statement_list"];
 
 /// Whether `node`'s subtree holds `kinds`, not looking into nested
 /// functions (nor, for `break`, into nested loops and switches).
@@ -70,7 +99,7 @@ fn contains_exit(node: tree_sitter::Node) -> bool {
     let mut stack = vec![(node, false)];
     while let Some((n, in_inner_loop)) = stack.pop() {
         let k = n.kind();
-        if k == "return_statement" || k == "throw_statement" {
+        if k == "return_statement" || k == "throw_statement" || k == "raise_statement" {
             return true;
         }
         if k == "break_statement" && !in_inner_loop {
@@ -81,15 +110,7 @@ fn contains_exit(node: tree_sitter::Node) -> bool {
             if FUNCTION_KINDS.contains(&c.kind()) {
                 continue;
             }
-            let inner = in_inner_loop
-                || matches!(
-                    c.kind(),
-                    "for_statement"
-                        | "for_in_statement"
-                        | "while_statement"
-                        | "do_statement"
-                        | "switch_statement"
-                );
+            let inner = in_inner_loop || BREAK_TARGETS.contains(&c.kind());
             stack.push((c, inner));
         }
     }
@@ -104,10 +125,13 @@ fn leaves_loop(await_node: tree_sitter::Node, body: tree_sitter::Node) -> bool {
         if cur.id() == body.id() {
             return false;
         }
-        if cur.kind() == "return_statement" || cur.kind() == "throw_statement" {
+        if matches!(
+            cur.kind(),
+            "return_statement" | "throw_statement" | "raise_statement"
+        ) {
             return true;
         }
-        if parent.kind() == "statement_block" || parent.id() == body.id() {
+        if BLOCKS.contains(&parent.kind()) || parent.id() == body.id() {
             let mut next = cur.next_named_sibling();
             while let Some(n) = next {
                 if EXITS.contains(&n.kind()) {
@@ -131,6 +155,10 @@ const FUNCTION_KINDS: &[&str] = &[
     "method_definition",
     "generator_function",
     "generator_function_declaration",
+    "method_declaration",
+    "func_literal",
+    "function_definition",
+    "lambda",
 ];
 
 /// `--` and `/* */` comments blanked, newlines kept so lines still count.
@@ -301,16 +329,15 @@ pub fn per_loop_iteration(node: tree_sitter::Node) -> Option<bool> {
         if FUNCTION_KINDS.contains(&p.kind()) {
             return None;
         }
-        if matches!(
-            p.kind(),
-            "for_statement" | "for_in_statement" | "while_statement" | "do_statement"
-        ) && let Some(body) = p.child_by_field_name("body")
+        if LOOPS.contains(&p.kind())
+            && let Some(body) = p.child_by_field_name("body")
             && body.id() == child.id()
         {
-            let for_await = p.kind() == "for_in_statement"
+            // `for await (…)`, Python's `async for`.
+            let for_await = matches!(p.kind(), "for_in_statement" | "for_statement")
                 && (0..p.child_count())
                     .filter_map(|i| p.child(i))
-                    .any(|c| c.kind() == "await");
+                    .any(|c| matches!(c.kind(), "await" | "async"));
             if for_await || leaves_loop(node, body) {
                 return None;
             }
@@ -325,6 +352,42 @@ pub fn per_loop_iteration(node: tree_sitter::Node) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `per_loop_iteration` of every `kind` node in `src`, by line.
+    fn loops(language: tree_sitter::Language, src: &str, kind: &str) -> Vec<(u32, Option<bool>)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let mut out = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            if n.kind() == kind && n.is_named() {
+                out.push((n.start_position().row as u32 + 1, per_loop_iteration(n)));
+            }
+            for i in (0..n.child_count()).rev() {
+                stack.extend(n.child(i));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn go_defers_in_a_loop_but_not_in_a_closure_or_on_the_way_out() {
+        let src = "package p\n\nfunc f(xs []int) {\n\tfor _, x := range xs {\n\t\tdefer g(x)\n\t\tfunc() { defer g(x) }()\n\t\tif x > 1 {\n\t\t\tbreak\n\t\t}\n\t}\n\tdefer g(0)\n}\n";
+        assert_eq!(
+            loops(tree_sitter_go::LANGUAGE.into(), src, "defer_statement"),
+            vec![(5, Some(true)), (6, None), (11, None)]
+        );
+    }
+
+    #[test]
+    fn python_awaits_per_iteration() {
+        let src = "async def f(xs):\n    for x in xs:\n        await g(x)\n    async for y in s():\n        await g(y)\n    while True:\n        await g(1)\n        return\n";
+        assert_eq!(
+            loops(tree_sitter_python::LANGUAGE.into(), src, "await"),
+            vec![(3, Some(false)), (5, None), (7, None)]
+        );
+    }
 
     #[test]
     fn statements_keep_their_first_line_and_skip_dollar_bodies() {

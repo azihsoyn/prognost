@@ -7,10 +7,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::imports::RESOLVABLE_EXTENSIONS;
+use crate::lang::SOURCE_EXTENSIONS;
 use crate::rev::Rev;
 
-/// The JS/TS files that differ between two revisions: `base...head`
+/// The source files that differ between two revisions: `base...head`
 /// (from their merge base) for two commits, so a branch against its
 /// trunk yields the branch's own changes; the working tree against
 /// `base` when head is the checkout. Unlike [`changed_files`], a file
@@ -21,7 +21,7 @@ pub fn changed_files_between(root: &Path, base: &Rev, head: &Rev) -> Result<Vec<
         .into_iter()
         .filter(|p| {
             p.extension()
-                .is_some_and(|ext| RESOLVABLE_EXTENSIONS.iter().any(|e| *e == ext))
+                .is_some_and(|ext| SOURCE_EXTENSIONS.iter().any(|e| *e == ext))
         })
         .collect())
 }

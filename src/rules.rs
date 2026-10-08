@@ -6,7 +6,7 @@
 //! `PROGNOST_CONFIG` names):
 //!
 //! ```toml
-//! presets = ["graph", "typescript", "postgres"]   # the default: all of them
+//! presets = ["graph", "typescript", "go", "python", "postgres"]  # the default: all
 //! disable = ["wide-reach"]                        # drop rules by name
 //!
 //! [[risk]]                                        # same name as a preset rule: replaces it
@@ -25,8 +25,9 @@
 //!   on any line of a function the change reaches (`scope = "reach"`).
 //! - `sql`: a regex on whole SQL statements of migrations, the ones the
 //!   diff added, forward half only.
-//! - `ast`: a tree-sitter query on TypeScript, matches on added lines,
-//!   optionally narrowed by a named filter (`per-loop-iteration`).
+//! - `ast`: a tree-sitter query on TypeScript, Go or Python, matches on
+//!   added lines, optionally narrowed by a named filter
+//!   (`per-loop-iteration`).
 //!
 //! Everything is deterministic: the same diff always gives the same
 //! findings.
@@ -45,6 +46,8 @@ use crate::risk::{self, Finding, Severity};
 pub const PRESETS: &[(&str, &str)] = &[
     ("graph", include_str!("../presets/graph.toml")),
     ("typescript", include_str!("../presets/typescript.toml")),
+    ("go", include_str!("../presets/go.toml")),
+    ("python", include_str!("../presets/python.toml")),
     ("postgres", include_str!("../presets/postgres.toml")),
 ];
 
@@ -106,7 +109,7 @@ pub struct RuleConfig {
     /// `sql`: skip statements on a table the same file creates (default true).
     #[serde(default = "yes")]
     pub skip_new_tables: bool,
-    /// `ast`: the language (`typescript`).
+    /// `ast`: the language: `typescript` (the default), `go`, `python`.
     #[serde(default)]
     pub language: Option<String>,
     /// `ast`: a tree-sitter query; the `@hit` capture (else the first) is reported.
@@ -221,14 +224,14 @@ impl Rule {
                 bail!("rule {n}: unknown filter {f:?} (known: per-loop-iteration)");
             }
         }
-        if let Some(lang) = &config.language
-            && lang != "typescript"
-        {
-            bail!("rule {n}: unknown language {lang:?} (known: typescript)");
-        }
+        let Some(grammar) = grammar(config.language.as_deref(), false) else {
+            bail!(
+                "rule {n}: unknown language {:?} (known: typescript, go, python)",
+                config.language.as_deref().unwrap_or_default()
+            );
+        };
         if let Some(q) = &config.query {
-            tree_sitter::Query::new(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), q)
-                .map_err(|e| anyhow!("rule {n}: query: {e}"))?;
+            tree_sitter::Query::new(&grammar, q).map_err(|e| anyhow!("rule {n}: query: {e}"))?;
         }
         let conditions = config
             .conditions
@@ -921,18 +924,31 @@ fn sql_findings(
     out
 }
 
-const TS_EXTENSIONS: &[&str] = &[
-    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "svelte",
-];
+/// The grammar an `ast` rule's `language` names (TSX's for a `.tsx`
+/// file).
+fn grammar(language: Option<&str>, tsx: bool) -> Option<tree_sitter::Language> {
+    Some(match language.unwrap_or("typescript") {
+        "typescript" if tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "go" => tree_sitter_go::LANGUAGE.into(),
+        "python" => tree_sitter_python::LANGUAGE.into(),
+        _ => return None,
+    })
+}
 
 /// Lines of `@hit` captures (else each match's first) that pass the
-/// rule's filters, with the facts the filters established.
+/// rule's filters, with the facts the filters established. Only files
+/// of the rule's language are read.
 fn ast_hits(r: &Rule, path: &str, source: &str) -> Vec<(u32, Vec<&'static str>)> {
-    let ext = Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    if !TS_EXTENSIONS.contains(&ext) {
+    use crate::lang::Lang;
+    let path = Path::new(path);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let wanted = match r.config.language.as_deref().unwrap_or("typescript") {
+        "go" => Lang::Go,
+        "python" => Lang::Python,
+        _ => Lang::TypeScript,
+    };
+    if Lang::of(path) != Some(wanted) {
         return Vec::new();
     }
     let (text, tsx) = match ext {
@@ -940,10 +956,8 @@ fn ast_hits(r: &Rule, path: &str, source: &str) -> Vec<(u32, Vec<&'static str>)>
         "tsx" | "jsx" => (source.to_string(), true),
         _ => (source.to_string(), false),
     };
-    let language: tree_sitter::Language = if tsx {
-        tree_sitter_typescript::LANGUAGE_TSX.into()
-    } else {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+    let Some(language) = grammar(r.config.language.as_deref(), tsx) else {
+        return Vec::new();
     };
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&language).is_err() {

@@ -84,12 +84,14 @@ the plan's two revisions. `--sarif` adds another analyser's results that
 sit on added lines. `--fail-on` exits 1 when a finding is at least that
 severe, for CI. `--json` prints an `Assessment` (schema: `assess`).
 
-Three rule presets are on by default:
+Five rule presets are on by default:
 
 | preset | rules |
 |---|---|
 | `graph` | `public-api-change` (low / medium / high as 1 / 2 / 3+ other packages import it; route handlers medium), `wide-reach` (20+ functions or 3+ packages upstream) |
 | `typescript` | `await-in-loop` (medium; low for polls, stream reads and loops that stop early) |
+| `go` | `defer-in-loop` (medium) |
+| `python` | `python-await-in-loop` (medium; low for polls and loops that stop early) |
 | `postgres` | `migration-drop`, `-rename`, `-not-null-without-default`, `-domain-rewrite`, `-alter-type` (high); `-set-not-null`, `-index-lock`, `-rls-policy` (medium); `-rls-disabled` (high) |
 
 A repository chooses presets and adds, replaces or turns off rules in its

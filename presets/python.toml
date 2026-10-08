@@ -1,0 +1,20 @@
+# Python.
+
+[[risk]]
+name = "python-await-in-loop"
+kind = "ast"
+language = "python"
+query = "(await) @hit"
+filters = ["per-loop-iteration"]
+severity = "medium"
+title = "new await inside a loop{in_function}: one round trip per iteration (N+1 if it queries)"
+
+  [[risk.variant]]
+  pattern = '''(?i)\bawait\s+(?:\w+\.)*(?:sleep|wait\w*)\b'''
+  severity = "low"
+  title = "new wait inside a loop{in_function}: polls until a condition holds"
+
+  [[risk.variant]]
+  when = "loop-stops-early"
+  severity = "low"
+  title = "new await inside a loop{in_function} that can stop early (attempts, fallbacks, reading until done): sequential by design"
