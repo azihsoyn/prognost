@@ -1,0 +1,27 @@
+# TypeScript / JavaScript (and the <script> of Svelte components).
+
+[[risk]]
+name = "await-in-loop"
+kind = "ast"
+language = "typescript"
+query = "(await_expression) @hit"
+filters = ["per-loop-iteration"]
+severity = "medium"
+title = "new await inside a loop{in_function}: one round trip per iteration (N+1 if it queries)"
+
+  # Sequential by design: the first variant that matches replaces the
+  # severity and title.
+  [[risk.variant]]
+  pattern = '''(?i)\bawait\s+(?:\w+\.)*(?:sleep|delay|wait\w*|setTimeout)\b'''
+  severity = "low"
+  title = "new wait inside a loop{in_function}: polls until a condition holds"
+
+  [[risk.variant]]
+  pattern = '''\bawait\s+[\w.]*\.(?:read|next)\(\s*\)'''
+  severity = "low"
+  title = "new await inside a loop{in_function}: reads a stream chunk by chunk"
+
+  [[risk.variant]]
+  when = "loop-stops-early"
+  severity = "low"
+  title = "new await inside a loop{in_function} that can stop early (attempts, fallbacks, reading until done): sequential by design"

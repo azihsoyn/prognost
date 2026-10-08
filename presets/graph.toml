@@ -1,0 +1,50 @@
+# Signals from prognost's own call graph: any language, any repository.
+# Rules sharing a name are tiers: the first whose `where` holds wins.
+
+[[risk]]
+name = "public-api-change"
+kind = "symbol"
+severity = "high"
+fold = true
+where = ["change != added", "public", "importing_packages >= 3"]
+title = "{name} changes behaviour; imported by {importing_packages} other packages ({importing_packages_list}), reaching {reach_functions} functions in {reach_packages} packages"
+
+[[risk]]
+name = "public-api-change"
+kind = "symbol"
+severity = "medium"
+fold = true
+where = ["change != added", "route"]
+title = "route {route} changes behaviour{called_from}"
+
+[[risk]]
+name = "public-api-change"
+kind = "symbol"
+severity = "medium"
+fold = true
+where = ["change != added", "exported", "importing_packages >= 2"]
+title = "exported {name} changes behaviour; imported by {importing_packages} other packages ({importing_packages_list})"
+
+[[risk]]
+name = "public-api-change"
+kind = "symbol"
+severity = "low"
+fold = true
+where = ["change != added", "exported", "importing_packages >= 1"]
+title = "exported {name} changes behaviour; imported by {importing_packages_list}"
+
+[[risk]]
+name = "wide-reach"
+kind = "symbol"
+severity = "low"
+fold = true
+where = ["change != added", "!public", "reach_functions >= 20"]
+title = "{name} is reached from {reach_functions} functions in {reach_packages} packages ({entries} entry points)"
+
+[[risk]]
+name = "wide-reach"
+kind = "symbol"
+severity = "low"
+fold = true
+where = ["change != added", "!public", "reach_packages >= 3"]
+title = "{name} is reached from {reach_functions} functions in {reach_packages} packages ({entries} entry points)"

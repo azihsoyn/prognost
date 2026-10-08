@@ -1,0 +1,80 @@
+# PostgreSQL migrations: statements the previous release, or a busy
+# table, may not survive. `sql` rules look at the forward half of files
+# matching `paths`, at statements the diff added, and skip tables the
+# same file creates.
+
+[[set]]
+name = "checked_domains"
+paths = '''\.sql$'''
+patterns = [
+  '''(?is)create\s+domain\s+(?:if\s+not\s+exists\s+)?"?(?:\w+\.)?(?P<name>\w+)"?\s+as\s+[^;]*?\bcheck\b''',
+  '''(?is)alter\s+domain\s+"?(?:\w+\.)?(?P<name>\w+)"?\s+add\s+(?:constraint\s+\S+\s+)?check\b''',
+]
+
+[[risk]]
+name = "migration-drop"
+kind = "sql"
+severity = "high"
+pattern = '''(?is)^\s*(?:alter\s+table\s+.*?\bdrop\s+(?P<what>(?:column\s+)?(?:if\s+exists\s+)?\w+)|drop\s+(?P<kind>table|view|materialized\s+view|type|domain|function|schema)\b)'''
+unless = '''(?i)\bdrop\s+constraint\b'''
+title = "drops {what}{kind}: the release still running reads it until it is replaced"
+
+[[risk]]
+name = "migration-rename"
+kind = "sql"
+severity = "high"
+pattern = '''(?is)^\s*alter\s+(?:table|type)\s+.*?\brename\b'''
+title = "renames a table, column or type the previous release still uses by its old name"
+
+[[risk]]
+name = "migration-not-null-without-default"
+kind = "sql"
+severity = "high"
+pattern = '''(?is)\badd\s+column\s+(?:if\s+not\s+exists\s+)?"?(?P<col>\w+)"?[^,]*?\bnot\s+null\b[^,]*'''
+unless = '''(?i)\bdefault\b'''
+title = "adds NOT NULL column {col} without a DEFAULT: fails on existing rows, and the previous release's inserts omit it"
+
+[[risk]]
+name = "migration-domain-rewrite"
+kind = "sql"
+severity = "high"
+pattern = '''(?is)\badd\s+column\s+(?:if\s+not\s+exists\s+)?"?(?P<col>\w+)"?\s+"?(?:\w+\.)?(?P<type>\w+)"?'''
+in_set = { capture = "type", set = "checked_domains" }
+title = "adds column {col} of domain type {type}, which has a CHECK: PostgreSQL rewrites the whole table under an exclusive lock"
+
+[[risk]]
+name = "migration-alter-type"
+kind = "sql"
+severity = "high"
+pattern = '''(?is)\balter\s+column\s+\S+\s+(?:set\s+data\s+)?type\b'''
+title = "changes a column's type: usually a whole-table rewrite, and the previous release reads the old type"
+
+[[risk]]
+name = "migration-set-not-null"
+kind = "sql"
+severity = "medium"
+pattern = '''(?is)\balter\s+column\s+\S+\s+set\s+not\s+null\b'''
+title = "sets NOT NULL on an existing column: a full scan under an exclusive lock"
+
+[[risk]]
+name = "migration-index-lock"
+kind = "sql"
+severity = "medium"
+pattern = '''(?is)^\s*create\s+(?:unique\s+)?index\s+.*?\bon\s+(?:only\s+)?"?(?P<table>[\w.]+)"?'''
+unless = '''(?is)^\s*create\s+(?:unique\s+)?index\s+concurrently\b'''
+title = "creates an index without CONCURRENTLY on an existing table: writes block until it is built"
+
+[[risk]]
+name = "migration-rls-policy"
+kind = "sql"
+severity = "medium"
+fold = true
+pattern = '''(?is)^\s*(?P<verb>create|alter|drop)\s+policy\s+(?:if\s+exists\s+)?(?P<policy>\S+)\s+on\s+"?(?P<table>[\w.]+)"?'''
+title = "changes RLS policy {policy} on {table} ({verb}): who reads or writes which rows, and takes an ACCESS EXCLUSIVE lock on the table"
+
+[[risk]]
+name = "migration-rls-disabled"
+kind = "sql"
+severity = "high"
+pattern = '''(?is)^\s*alter\s+table\s+.*?\b(?:disable|no\s+force)\s+row\s+level\s+security\b'''
+title = "turns row-level security off (or stops forcing it) for a table: every row becomes visible to every user"

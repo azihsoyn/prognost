@@ -1,0 +1,1265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "assess": {
+    "$defs": {
+      "Counts": {
+        "properties": {
+          "high": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "low": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "medium": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "type": "object"
+      },
+      "Finding": {
+        "description": "One thing the plan warns about.",
+        "properties": {
+          "excerpt": {
+            "description": "The source line, trimmed.",
+            "type": "string"
+          },
+          "function": {
+            "description": "The changed function it concerns, when there is one (an id from\nthe plan's `changed`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "description": "1-based, in the head revision.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "rule": {
+            "description": "The rule's id: `await-in-loop`, `migration-drop`, a custom name…",
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/$defs/Severity"
+          },
+          "title": {
+            "description": "One line saying what is risky, for a person.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule",
+          "severity",
+          "title",
+          "path",
+          "line",
+          "excerpt"
+        ],
+        "type": "object"
+      },
+      "Severity": {
+        "enum": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "base": {
+        "description": "The plan's revisions.",
+        "type": "string"
+      },
+      "counts": {
+        "$ref": "#/$defs/Counts"
+      },
+      "findings": {
+        "description": "What the rules found, most severe first.",
+        "items": {
+          "$ref": "#/$defs/Finding"
+        },
+        "type": "array"
+      },
+      "head": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "version",
+      "base",
+      "findings",
+      "counts"
+    ],
+    "title": "Assessment",
+    "type": "object"
+  },
+  "impact": {
+    "$defs": {
+      "Chain": {
+        "properties": {
+          "changed": {
+            "description": "The id (in `changed`) of the changed function this chain ends at.",
+            "type": "string"
+          },
+          "entry": {
+            "$ref": "#/$defs/Entry"
+          },
+          "hops": {
+            "description": "From the entry down: `hops[0]` is the entry itself, each hop's\n`call_site` is its line calling the next hop, and the last hop's\ncalls the changed function. Empty when the entry is itself the\nchanged function.",
+            "items": {
+              "$ref": "#/$defs/Hop"
+            },
+            "type": "array"
+          },
+          "reaches": {
+            "description": "Every changed function reachable from this entry, nearest first.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "entry",
+          "changed",
+          "reaches",
+          "hops"
+        ],
+        "type": "object"
+      },
+      "Change": {
+        "enum": [
+          "added",
+          "removed",
+          "changed",
+          "unchanged"
+        ],
+        "type": "string"
+      },
+      "Crossing": {
+        "properties": {
+          "calls": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "changed_calls": {
+            "description": "Of those, calls the diff added or removed.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "from": {
+            "type": "string"
+          },
+          "routes": {
+            "description": "Route handlers among the callees.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "calls",
+          "changed_calls",
+          "routes"
+        ],
+        "type": "object"
+      },
+      "Entry": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/EntryKind"
+          },
+          "label": {
+            "description": "The route for a handler, the function's name otherwise.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "id"
+        ],
+        "type": "object"
+      },
+      "EntryKind": {
+        "oneOf": [
+          {
+            "const": "route",
+            "description": "A route handler.",
+            "type": "string"
+          },
+          {
+            "const": "component",
+            "description": "A UI component (a `.svelte` file's script).",
+            "type": "string"
+          },
+          {
+            "const": "module",
+            "description": "Top-level code of a module (a step table, a `main()` call).",
+            "type": "string"
+          },
+          {
+            "const": "export",
+            "description": "An exported function no caller was found for.",
+            "type": "string"
+          },
+          {
+            "const": "function",
+            "description": "A function no caller was found for that isn't exported.",
+            "type": "string"
+          },
+          {
+            "const": "unexplored",
+            "description": "The walk stopped before looking for this function's callers.",
+            "type": "string"
+          }
+        ]
+      },
+      "Function": {
+        "description": "A function (or a module-level reference, or a factory-built export)\nin the call graph.",
+        "properties": {
+          "change": {
+            "$ref": "#/$defs/Change"
+          },
+          "id": {
+            "description": "Stable within one report; chains refer to functions by it.",
+            "type": "string"
+          },
+          "line": {
+            "description": "First and last line of the body.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "The function's name, `METHOD /path` for a route handler,\n`anon@<line>` for an anonymous function.",
+            "type": "string"
+          },
+          "package": {
+            "description": "The workspace package holding the file, when there is one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "route": {
+            "description": "For a route handler: `METHOD /mounted/path`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "side": {
+            "$ref": "#/$defs/Side",
+            "description": "Which revision `line`/`to` are in: \"head\", or \"base\" for a\nfunction only the base has."
+          },
+          "to": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "path",
+          "line",
+          "to",
+          "side",
+          "change"
+        ],
+        "type": "object"
+      },
+      "Hop": {
+        "description": "A function (or a module-level reference, or a factory-built export)\nin the call graph.",
+        "properties": {
+          "call_site": {
+            "description": "The line in this function calling the next step; `null` when the\ncall could not be placed (a reference passed as a value, say).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "change": {
+            "$ref": "#/$defs/Change"
+          },
+          "id": {
+            "description": "Stable within one report; chains refer to functions by it.",
+            "type": "string"
+          },
+          "line": {
+            "description": "First and last line of the body.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "The function's name, `METHOD /path` for a route handler,\n`anon@<line>` for an anonymous function.",
+            "type": "string"
+          },
+          "package": {
+            "description": "The workspace package holding the file, when there is one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "route": {
+            "description": "For a route handler: `METHOD /mounted/path`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "side": {
+            "$ref": "#/$defs/Side",
+            "description": "Which revision `line`/`to` are in: \"head\", or \"base\" for a\nfunction only the base has."
+          },
+          "to": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "path",
+          "line",
+          "to",
+          "side",
+          "change"
+        ],
+        "type": "object"
+      },
+      "Limits": {
+        "properties": {
+          "hops": {
+            "description": "Caller hops walked up from the changed functions.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "nodes": {
+            "description": "Node count after which the walk stops.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "hops",
+          "nodes"
+        ],
+        "type": "object"
+      },
+      "PackageAffected": {
+        "properties": {
+          "functions": {
+            "description": "Functions in it that call into changed code, transitively,\nwithout changes of their own.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "package": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "package",
+          "functions"
+        ],
+        "type": "object"
+      },
+      "PackageChange": {
+        "properties": {
+          "files": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "functions": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "package": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "package",
+          "files",
+          "functions"
+        ],
+        "type": "object"
+      },
+      "Packages": {
+        "properties": {
+          "affected": {
+            "items": {
+              "$ref": "#/$defs/PackageAffected"
+            },
+            "type": "array"
+          },
+          "changed": {
+            "items": {
+              "$ref": "#/$defs/PackageChange"
+            },
+            "type": "array"
+          },
+          "crossings": {
+            "items": {
+              "$ref": "#/$defs/Crossing"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "changed",
+          "affected",
+          "crossings"
+        ],
+        "type": "object"
+      },
+      "Side": {
+        "enum": [
+          "head",
+          "base"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "base": {
+        "description": "The commit the diff is taken from: the merge base of `--base`\n(default: the remote's default branch) and the head.",
+        "type": "string"
+      },
+      "chains": {
+        "description": "One per entry point: the shortest call path from it to the\nnearest changed function. An entry is a function nothing else\nwas found to call, or a route handler (an entry even when a\nfrontend calls it, so the API surface is always listed).",
+        "items": {
+          "$ref": "#/$defs/Chain"
+        },
+        "type": "array"
+      },
+      "changed": {
+        "description": "Every function whose body the diff added, removed or changed.",
+        "items": {
+          "$ref": "#/$defs/Function"
+        },
+        "type": "array"
+      },
+      "head": {
+        "description": "The head commit; `null` for the working tree.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "limits": {
+        "$ref": "#/$defs/Limits"
+      },
+      "packages": {
+        "$ref": "#/$defs/Packages",
+        "description": "The per-package summary."
+      },
+      "truncated": {
+        "description": "The upstream walk stopped at its hop or node limit, so some\nchains may end before their real entry (`entry.kind:\n\"unexplored\"`).",
+        "type": "boolean"
+      },
+      "version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "version",
+      "base",
+      "changed",
+      "chains",
+      "packages",
+      "truncated",
+      "limits"
+    ],
+    "title": "ImpactReport",
+    "type": "object"
+  },
+  "plan": {
+    "$defs": {
+      "Call": {
+        "properties": {
+          "callee": {
+            "type": "string"
+          },
+          "caller": {
+            "type": "string"
+          },
+          "change": {
+            "$ref": "#/$defs/CallChange"
+          },
+          "line": {
+            "description": "The caller's line making the call (head); `null` when it could\nnot be placed, or for a call the diff removed.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "caller",
+          "callee",
+          "change"
+        ],
+        "type": "object"
+      },
+      "CallChange": {
+        "enum": [
+          "added",
+          "removed",
+          "unchanged"
+        ],
+        "type": "string"
+      },
+      "Change": {
+        "enum": [
+          "added",
+          "removed",
+          "changed",
+          "unchanged"
+        ],
+        "type": "string"
+      },
+      "ChangeCounts": {
+        "properties": {
+          "added": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "changed": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "files_without_function_changes": {
+            "description": "Files touched without any function-level change (types, config,\nSQL, markup …).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "removed": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "added",
+          "changed",
+          "removed",
+          "files_without_function_changes"
+        ],
+        "type": "object"
+      },
+      "EntryKind": {
+        "oneOf": [
+          {
+            "const": "route",
+            "description": "A route handler.",
+            "type": "string"
+          },
+          {
+            "const": "component",
+            "description": "A UI component (a `.svelte` file's script).",
+            "type": "string"
+          },
+          {
+            "const": "module",
+            "description": "Top-level code of a module (a step table, a `main()` call).",
+            "type": "string"
+          },
+          {
+            "const": "export",
+            "description": "An exported function no caller was found for.",
+            "type": "string"
+          },
+          {
+            "const": "function",
+            "description": "A function no caller was found for that isn't exported.",
+            "type": "string"
+          },
+          {
+            "const": "unexplored",
+            "description": "The walk stopped before looking for this function's callers.",
+            "type": "string"
+          }
+        ]
+      },
+      "FileChange": {
+        "properties": {
+          "change": {
+            "$ref": "#/$defs/FileChangeKind"
+          },
+          "package": {
+            "description": "The workspace package holding it, when there is one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "previous_path": {
+            "description": "For a rename: where it was.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "change"
+        ],
+        "type": "object"
+      },
+      "FileChangeKind": {
+        "enum": [
+          "added",
+          "modified",
+          "deleted",
+          "renamed"
+        ],
+        "type": "string"
+      },
+      "Function": {
+        "properties": {
+          "change": {
+            "$ref": "#/$defs/Change"
+          },
+          "entry": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EntryKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set when it is an entry point: nothing else was found calling\nit, or it is a route handler."
+          },
+          "exported": {
+            "description": "Declared `export` at the top level of its module.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Stable within one report; `calls` and `summary` refer to it.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Its name, `METHOD /path` for a route handler, `anon@<line>` for\nan anonymous function.",
+            "type": "string"
+          },
+          "package": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "range": {
+            "$ref": "#/$defs/LineRange",
+            "description": "First and last line of the body, in `side`'s revision."
+          },
+          "route": {
+            "description": "For a route handler: `METHOD /mounted/path`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "side": {
+            "$ref": "#/$defs/Side",
+            "description": "`head`, or `base` for a function only the base has (removed)."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "path",
+          "range",
+          "side",
+          "change",
+          "exported"
+        ],
+        "type": "object"
+      },
+      "Limits": {
+        "properties": {
+          "hops": {
+            "description": "Caller hops walked up from the changed functions.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "nodes": {
+            "description": "Node count after which the walk stops.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "hops",
+          "nodes"
+        ],
+        "type": "object"
+      },
+      "LineRange": {
+        "description": "1-based, inclusive.",
+        "properties": {
+          "end": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
+      "PackageReach": {
+        "properties": {
+          "files": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "functions": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "package": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "package",
+          "functions",
+          "files"
+        ],
+        "type": "object"
+      },
+      "Reach": {
+        "properties": {
+          "entries": {
+            "additionalProperties": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Entry points by kind.",
+            "type": "object"
+          },
+          "files": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "functions": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "packages": {
+            "items": {
+              "$ref": "#/$defs/PackageReach"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "functions",
+          "files",
+          "packages",
+          "entries"
+        ],
+        "type": "object"
+      },
+      "Side": {
+        "enum": [
+          "head",
+          "base"
+        ],
+        "type": "string"
+      },
+      "Summary": {
+        "properties": {
+          "changed": {
+            "$ref": "#/$defs/ChangeCounts"
+          },
+          "reach": {
+            "$ref": "#/$defs/Reach",
+            "description": "Everything upstream of the changed functions, together: the\nfunctions with `change: \"unchanged\"`, over calls the diff keeps."
+          },
+          "symbols": {
+            "description": "Per changed function, widest reach first.",
+            "items": {
+              "$ref": "#/$defs/SymbolSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "changed",
+          "reach",
+          "symbols"
+        ],
+        "type": "object"
+      },
+      "SymbolSummary": {
+        "properties": {
+          "called_from_packages": {
+            "description": "Packages other than its own with a direct call to it.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "A function id.",
+            "type": "string"
+          },
+          "public": {
+            "description": "A route handler, or exported and called from another package.",
+            "type": "boolean"
+          },
+          "reach_entries": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reach_files": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reach_functions": {
+            "description": "What calls it, directly or not (other changed functions excluded\nfrom `functions`).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reach_packages": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "public",
+          "called_from_packages",
+          "reach_functions",
+          "reach_files",
+          "reach_packages",
+          "reach_entries"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "base": {
+        "description": "The merge base the diff is taken from.",
+        "type": "string"
+      },
+      "calls": {
+        "description": "Calls between those functions, caller → callee.",
+        "items": {
+          "$ref": "#/$defs/Call"
+        },
+        "type": "array"
+      },
+      "files": {
+        "description": "Every file the diff touches, whatever its kind.",
+        "items": {
+          "$ref": "#/$defs/FileChange"
+        },
+        "type": "array"
+      },
+      "functions": {
+        "description": "The functions the diff added, removed or changed, and every\nfunction upstream of them (`change: \"unchanged\"`).",
+        "items": {
+          "$ref": "#/$defs/Function"
+        },
+        "type": "array"
+      },
+      "head": {
+        "description": "The head commit; `null` for the working tree.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "limits": {
+        "$ref": "#/$defs/Limits"
+      },
+      "summary": {
+        "$ref": "#/$defs/Summary",
+        "description": "Counts derived from the facts above."
+      },
+      "truncated": {
+        "description": "The caller walk stopped at its limit: upstream is a lower bound.",
+        "type": "boolean"
+      },
+      "version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "version",
+      "base",
+      "files",
+      "functions",
+      "calls",
+      "summary",
+      "truncated",
+      "limits"
+    ],
+    "title": "PlanReport",
+    "type": "object"
+  },
+  "request": {
+    "$defs": {
+      "Scope": {
+        "oneOf": [
+          {
+            "enum": [
+              "staged"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "uncommitted",
+            "description": "Working tree against HEAD: unstaged and staged together.",
+            "type": "string"
+          },
+          {
+            "const": "branch",
+            "description": "Against the default branch's most recent common ancestor with HEAD.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "description": "The graph's starting nodes: the files a diff touched, or one\nexplicit `file` (`file:line` accepted, the line is not part of a\nfile-level graph and is only echoed back to the caller). No edges —\nnothing is reached until something is expanded.",
+        "properties": {
+          "path": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Scope"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "type": {
+            "const": "origin",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Origin plus `hops` steps outward in both directions, folded into\none graph. For a caller that wants the whole picture in one call —\nthe TUI instead expands one node at a time, on request, by calling\nthe same functions this dispatches to.",
+        "properties": {
+          "hops": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Scope"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "type": {
+            "const": "graph",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "Request"
+  },
+  "response": {
+    "$defs": {
+      "Edge": {
+        "properties": {
+          "from": {
+            "description": "The importer.",
+            "type": "string"
+          },
+          "to": {
+            "description": "The imported.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "ErrorBody": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "Graph": {
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/$defs/Edge"
+            },
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/$defs/Group"
+            },
+            "type": "array"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/$defs/Node"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "nodes",
+          "groups",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "Group": {
+        "properties": {
+          "dir": {
+            "description": "Repo-relative directory; doubles as the group's id.",
+            "type": "string"
+          },
+          "label": {
+            "description": "The package's own name, when it declares one; the directory\notherwise.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dir",
+          "label"
+        ],
+        "type": "object"
+      },
+      "Node": {
+        "properties": {
+          "group": {
+            "type": "string"
+          },
+          "origin": {
+            "description": "True for a file the diff actually touched — everything reached by\nexpanding from it is false.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Repo-relative path; doubles as the node's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "group",
+          "origin"
+        ],
+        "type": "object"
+      },
+      "Response": {
+        "oneOf": [
+          {
+            "properties": {
+              "graph": {
+                "$ref": "#/$defs/Graph"
+              },
+              "type": {
+                "const": "graph",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "graph"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "const": "error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The envelope a response is returned in, matching the `td`/`hide` shape\nso anything already handling one can handle this too.",
+    "properties": {
+      "error": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ErrorBody"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "id": {
+        "type": "string"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Response"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "title": "Envelope",
+    "type": "object"
+  },
+  "title": "prognost map API",
+  "version": 1
+}

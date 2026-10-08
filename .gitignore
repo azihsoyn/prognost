@@ -1,0 +1,34 @@
+# Build output
+/target/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local agent / tool settings
+.claude/settings.local.json
+
+# Secrets
+.env
+.env.*
+
+# Output of running prognost against other repositories. These quote that
+# code (paths, function names, source lines) and must never be committed.
+*.sarif
+*.dump
+*.log
+/plan*.json
+/assess*.json
+/impact*.json
+/*.html
+
+# Local configuration and scratch space. A prognost.toml in this repository
+# would be someone's private rules for another codebase; docs/ shows the format.
+/prognost.toml
+*.local.toml
+/scratch/
+/private/
