@@ -15,8 +15,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0          # the merge base must be reachable
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --locked --git https://github.com/azihsoyn/prognost
+      - name: Install prognost
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/azihsoyn/prognost/releases/latest/download/prognost-installer.sh | sh
       - name: Plan
         run: prognost plan --base origin/${{ github.base_ref }} --head HEAD --json > plan.json
       - name: Assess

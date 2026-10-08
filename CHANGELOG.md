@@ -22,6 +22,8 @@ follow [Semantic Versioning](https://semver.org/).
 - herdr: `graph` without a terminal opens in a pane beside the caller; `o`
   edits in a pane beside the graph.
 - `--color auto|always|never`, `--no-color`, `NO_COLOR`, `CLICOLOR_FORCE`.
+- Releases: prebuilt binaries for macOS and Linux (arm64 and x86_64), a
+  shell installer, and a Homebrew formula in `azihsoyn/tap`.
 - `cache`: where extracted commit trees are kept and how much they take;
   `cache clean` removes them.
 

@@ -41,13 +41,25 @@ It is not a linter (it judges a change, not a codebase), not a test or
 coverage tool, and not a runtime tracer: everything comes from the two
 revisions in git.
 
-## Quick start
-
-Needs git and Rust 1.90 or later.
+## Install
 
 ```sh
-cargo install --git https://github.com/azihsoyn/prognost
+brew install azihsoyn/tap/prognost   # Homebrew (macOS/Linux)
+cargo install --git https://github.com/azihsoyn/prognost   # or from source (Rust 1.90+)
+```
 
+Or the prebuilt binary for macOS or Linux, from the
+[latest release](https://github.com/azihsoyn/prognost/releases/latest):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/azihsoyn/prognost/releases/latest/download/prognost-installer.sh | sh
+```
+
+It needs `git` on the `PATH`.
+
+## Quick start
+
+```sh
 cd your-repo
 prognost graph                              # walk the change in the terminal
 prognost plan                               # what it reaches

@@ -36,3 +36,8 @@ tempfile = "3.13"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# The profile release builds use (cargo-dist, see dist-workspace.toml).
+[profile.dist]
+inherits = "release"
+lto = "thin"
