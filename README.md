@@ -1,11 +1,8 @@
 <p align="center">
-  <img src="assets/logo.svg" width="112" alt="prognost logo: a change at the bottom, its callers lit up above it">
+  <img src="assets/logo.svg" width="560" alt="prognost — a prognosis for a code change">
 </p>
 
-<h1 align="center">prognost</h1>
-
 <p align="center">
-  <b>A prognosis for a code change.</b><br>
   Which functions a diff touches, how far that reaches through the code that calls them,<br>
   and what in that reach looks risky — before it ships, from static analysis alone.
 </p>

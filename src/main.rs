@@ -64,7 +64,7 @@ fn main() -> Result<()> {
 
     match first {
         "-h" | "--help" => {
-            print!("{USAGE}");
+            print!("\n{}\n{USAGE}", prognost::color::logo());
             return Ok(());
         }
         "--schema" => {

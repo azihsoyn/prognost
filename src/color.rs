@@ -117,6 +117,32 @@ pub fn bold_green(s: &str) -> String {
     paint(s, "1;32")
 }
 
+/// The logo (`assets/logo.txt`), coloured: the calls cyan, the change
+/// amber, the node nothing reaches dim, the tagline dim.
+pub fn logo() -> String {
+    const LOGO: &str = include_str!("../assets/logo.txt");
+    let mut out = String::new();
+    for line in LOGO.lines() {
+        let (art, tag) = match line.char_indices().nth(17) {
+            Some((i, _)) if line.contains("prognosis") => line.split_at(i),
+            _ => (line, ""),
+        };
+        for ch in art.chars() {
+            let s = ch.to_string();
+            out.push_str(&match ch {
+                '●' | '╲' | '╱' => cyan(&s),
+                '◉' => paint(&s, "1;33"),
+                '○' => dim(&s),
+                ' ' => s,
+                _ => bold(&s),
+            });
+        }
+        out.push_str(&dim(tag));
+        out.push('\n');
+    }
+    out
+}
+
 /// Colours out of a drawn TUI frame, for `--color never`: every cell back
 /// to the terminal's own colours, and a cell that stood out by its
 /// background (the selection, a highlighted chain) reversed instead, so
