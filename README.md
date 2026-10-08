@@ -3,8 +3,9 @@
 </p>
 
 <p align="center">
-  Which functions a diff touches, how far that reaches through the code that calls them,<br>
-  and what in that reach looks risky — before it ships, from static analysis alone.
+  <b>Read a change's prognosis before it ships.</b><br>
+  Like <code>terraform plan</code>, for code: what a diff touches, how far it reaches<br>
+  through the code that calls it, and what in that reach looks risky.
 </p>
 
 <p align="center">
@@ -17,23 +18,40 @@
   <img src="docs/demo/demo.gif" alt="prognost plan, assess and graph on a small demo monorepo: a change to a shared connection-pool library, followed up through the database, the API route and the web page that call it">
 </p>
 
-A line diff shows what changed. It doesn't show where the change lands: the
-route three packages away that now waits on a new drain loop, the worker
+A diff is a diagnosis: it says what changed. It doesn't say what follows —
+the route three packages away that now waits on a new drain loop, the worker
 that started querying once per invoice, the migration that rewrites a busy
-table. prognost reads both revisions of a TypeScript codebase, works out
-which functions really changed, follows their callers up to the entry
-points, and lets you walk that — in the terminal, in a browser, or as JSON
-for a CI step or an agent.
+table. **prognost** gives the prognosis. It reads both revisions of a
+TypeScript codebase, works out which functions really changed, follows
+everything that calls them up to the entry points, and checks that reach
+against rules — statically, deterministically, without running anything.
+
+The way `terraform plan` shows what an apply would touch before it happens,
+`prognost plan` shows what a change reaches before it merges, and
+`prognost assess` judges that plan with rules, the way a policy check
+judges a terraform plan.
+
+- **Reviewers** walk the change from what it touches to where it's used,
+  instead of reading files in alphabetical order.
+- **Authors** see who they affect before asking for review.
+- **CI** fails a pull request on the risks a team cares about.
+- **Agents** get the facts as JSON instead of guessing from a diff.
+
+It is not a linter (it judges a change, not a codebase), not a test or
+coverage tool, and not a runtime tracer: everything comes from the two
+revisions in git.
 
 ## Quick start
+
+Needs git and Rust 1.90 or later.
 
 ```sh
 cargo install --git https://github.com/azihsoyn/prognost
 
 cd your-repo
-prognost plan                               # what changes, and how far it reaches
+prognost graph                              # walk the change in the terminal
+prognost plan                               # what it reaches
 prognost plan --json | prognost assess -    # what in that looks risky
-prognost graph                              # walk it in the terminal
 ```
 
 Every command diffs from the merge base of `--base` (default: the remote's
@@ -47,6 +65,23 @@ To try it on the code in the demo above:
 docs/demo/make-demo-repo.sh /tmp/prognost-demo
 cd /tmp/prognost-demo && prognost graph --base main
 ```
+
+## graph: walk it
+
+`prognost graph` draws the changed functions grouped by package, with their
+callers and callees. Move with the arrow keys or `hjkl`: `←` steps to a
+caller (finding more as you go), `→` to a callee, `Enter` opens the diff of
+the selected function, `z`/`Z` folds a package into files or directories,
+`v` marks a file seen.
+
+`prognost graph --html page.html` writes the same graph as a single web page
+— click a function to light up every chain through it, double-click to read
+its diff — and `prognost serve` serves it with seen marks kept in sync with
+GitHub's *Viewed* checkboxes.
+
+<p align="center">
+  <img src="docs/demo/web.png" width="900" alt="The web page: packages as cards, changed functions highlighted, curves for the calls between them">
+</p>
 
 ## plan: what changes, and how far it reaches
 
@@ -76,40 +111,29 @@ its line — and a summary derived from them. See [docs/plan.md](docs/plan.md).
 
 ```
 $ prognost plan --base main --json | prognost assess -
-  ⚠ high   migration-domain-rewrite           adds column gift_message of domain type nonempty_text, which has a CHECK:
-                                              PostgreSQL rewrites the whole table under an exclusive lock
-  ⚠ high   migration-not-null-without-default adds NOT NULL column note without a DEFAULT
-  ⚠ high   public-api-change                  createPool changes behaviour; imported by 3 other packages
-  ⚠ medium await-in-loop                      new await inside a loop in runInvoices: one round trip per iteration
+  ⚠ high   migration-domain-rewrite           adds column gift_message of domain type nonempty_text, which has a CHECK: PostgreSQL rewrites the whole table under an exclusive lock
+             apps/shop/database/migrations/0002_order_note.sql:2  ALTER TABLE orders ADD COLUMN gift_message nonempty_text;
+  ⚠ high   migration-not-null-without-default adds NOT NULL column note without a DEFAULT: fails on existing rows, and the previous release's inserts omit it
+             apps/shop/database/migrations/0002_order_note.sql:1  ALTER TABLE orders ADD COLUMN note text NOT NULL;
+  ⚠ high   public-api-change                  createPool changes behaviour; imported by 3 other packages (@admin/reports, @billing/worker, @shop/database), reaching 9 functions in 5 packages
+             packages/db-pool/src/index.ts:19  export const createPool = (options: PoolOptions): Pool => {
+  ⚠ medium await-in-loop                      new await inside a loop in runInvoices: one round trip per iteration (N+1 if it queries)
+             apps/billing/worker/src/main.ts:7  await pool.query('UPDATE invoices SET charged = true WHERE id = $1', [id]);
   · low    await-in-loop                      new wait inside a loop in drainWaiters: polls until a condition holds
-  · low    wide-reach                         resetPool is reached from 9 functions in 6 packages
+             packages/db-pool/src/index.ts:10  await sleep(25);
+  · low    wide-reach                         resetPool is reached from 9 functions in 6 packages (6 entry points)
+             packages/db-pool/src/index.ts:14  const resetPool = async (pool: Pool, timeoutMs: number) => {
 
 Assessment: 3 high, 1 medium, 2 low.
 ```
 
+Each finding names the rule, the place (`file:line`) and the line itself.
 `plan` and `assess` are two steps on purpose, the way `terraform plan` and a
 policy check are. Rules are data: presets for the call graph, TypeScript
 and PostgreSQL migrations ship built in, and a repository adds, replaces or
 turns off rules in its `prognost.toml`. `--sarif` folds in other analysers'
 results on the lines the diff added, and `--fail-on high` makes it a CI
 gate. See [docs/rules.md](docs/rules.md).
-
-## graph: walk it
-
-`prognost graph` draws the changed functions grouped by package, with their
-callers and callees. Move with the arrow keys or `hjkl`: `←` steps to a
-caller (finding more as you go), `→` to a callee, `Enter` opens the diff of
-the selected function, `z`/`Z` folds a package into files or directories,
-`v` marks a file seen.
-
-`prognost graph --html page.html` writes the same graph as a single web page
-— click a function to light up every chain through it, double-click to read
-its diff — and `prognost serve` serves it with seen marks kept in sync with
-GitHub's *Viewed* checkboxes.
-
-<p align="center">
-  <img src="docs/demo/web.png" width="900" alt="The web page: packages as cards, changed functions highlighted, curves for the calls between them">
-</p>
 
 ## How it works
 
@@ -175,6 +199,7 @@ prognost plan [--json]               # what changes and how far it reaches
 prognost assess [<plan.json> | -]    # the plan's risks, by rules; --sarif, --fail-on
 prognost rules                       # the rules in force here
 prognost align <file>[:<symbol>]     # one file: its functions aligned across the revisions
+prognost cache [clean]               # the commit trees kept between runs, or remove them
 ```
 
 Output is coloured on a terminal and plain when piped. `--color

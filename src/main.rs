@@ -8,6 +8,9 @@ use prognost::rev::Rev;
 use prognost::{align, flow_tui, html, repo, ts_extract, workspace};
 
 const USAGE: &str = "\
+Read a code change's prognosis before it ships. Like `terraform plan`, for code:
+what a diff touches, how far it reaches through its callers, what looks risky.
+
 Usage: prognost <command> [options]
 
 Every command diffs from the merge base of --base (default: origin's default
