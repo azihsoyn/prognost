@@ -56,9 +56,10 @@ under `.route('/api/v1/orders', …)`) is built in.
 | **Modules** | TypeScript: relative imports, package names, barrels (`export * from`), tsconfig `paths` | ✅ |
 | | TypeScript: CommonJS `require` | ◐ files that `require` a module count as importing it; calls through the binding are not resolved |
 | | Go: packages of the repository's modules; calls within a package across its files | ✅ |
-| | Go: methods (`s.pool.Query`) | ◐ found in the caller's own package, else in the one package it imports that defines a method of that name; interfaces are not followed |
+| | Go: methods (`s.pool.Query`) | ✅ in the caller's own package, else the one package it imports with a method of that name |
+| | Go: calls through an interface | ◐ every type in the repository with the interface's methods (by name), up to 8, marked `inferred` |
 | | Python: absolute and relative imports, `__init__.py` re-exports, `src/` layouts | ✅ |
-| | Python: methods on instances (`repo.save()`) | ◐ only when the calling file itself defines a method of that name |
+| | Python: methods on instances (`repo.save()`) | ◐ when the code states the class: a parameter's annotation, `x = Repo(…)`, `self.x = …` or `self.x: Repo` in the class; otherwise only a method of that name in the calling file |
 | **Workspaces** | pnpm (`pnpm-workspace.yaml`), npm and yarn (`package.json` `workspaces`) | ✅ |
 | | Go modules (`go.mod`, several per repository) | ✅ each package is its directory |
 | | Python projects (`pyproject.toml`, `setup.py`) | ✅ |

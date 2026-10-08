@@ -543,6 +543,10 @@
           "change": {
             "$ref": "#/$defs/CallChange"
           },
+          "inferred": {
+            "description": "The call's target is a guess: a Go method called through an\ninterface, which may land on any of its implementations. Absent\nwhen false.",
+            "type": "boolean"
+          },
           "line": {
             "description": "The caller's line making the call (head); `null` when it could\nnot be placed, or for a call the diff removed.",
             "format": "uint32",

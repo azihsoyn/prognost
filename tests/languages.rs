@@ -275,3 +275,89 @@ fn python_reaches_through_relative_imports_and_package_reexports() {
         assert!(upstream.iter().any(|u| u == f), "{f} not in {upstream:?}");
     }
 }
+
+#[test]
+fn go_calls_through_an_interface_reach_its_implementations_as_inferred() {
+    let base: &[(&str, &str)] = &[
+        ("go.mod", "module example.com/shop\n\ngo 1.22\n"),
+        (
+            "orders/service.go",
+            "package orders\n\ntype Store interface {\n\tSave(id string) error\n}\n\ntype Service struct{ store Store }\n\nfunc (s *Service) Checkout(id string) error {\n\treturn s.store.Save(id)\n}\n",
+        ),
+        (
+            "postgres/store.go",
+            "package postgres\n\ntype PgStore struct{}\n\nfunc (p *PgStore) Save(id string) error { return nil }\n",
+        ),
+        (
+            "memory/store.go",
+            "package memory\n\ntype MemStore struct{}\n\nfunc (m *MemStore) Save(id string) error { return nil }\n",
+        ),
+    ];
+    let (_dir, report) = plan(
+        base,
+        &[(
+            "postgres/store.go",
+            "package postgres\n\ntype PgStore struct{}\n\nfunc (p *PgStore) Save(id string) error {\n\tif id == \"\" {\n\t\treturn nil\n\t}\n\treturn nil\n}\n",
+        )],
+    );
+    let call = report
+        .calls
+        .iter()
+        .find(|c| c.callee == "postgres/store.go::Save")
+        .expect("a call into the changed method");
+    assert_eq!(call.caller, "orders/service.go::Checkout");
+    assert!(call.inferred);
+    assert_eq!(call.line, Some(10));
+}
+
+#[test]
+fn python_calls_on_typed_instances_reach_the_method() {
+    let base: &[(&str, &str)] = &[
+        ("pyproject.toml", "[project]\nname = \"app\"\n"),
+        ("app/__init__.py", ""),
+        (
+            "app/repo.py",
+            "class OrderRepo:\n    def save(self, order):\n        return order\n",
+        ),
+        (
+            "app/service.py",
+            r#"from app.repo import OrderRepo
+
+
+class Checkout:
+    def __init__(self, repo: OrderRepo):
+        self.repo = repo
+
+    def run(self, order):
+        self.repo.save(order)
+
+
+def nightly(db):
+    repo = OrderRepo()
+    repo.save(db)
+
+
+def save(x):
+    return x
+"#,
+        ),
+        (
+            "app/other.py",
+            "from app.service import save\n\n\ndef unrelated():\n    save(1)\n",
+        ),
+    ];
+    let (_dir, report) = plan(
+        base,
+        &[(
+            "app/repo.py",
+            "class OrderRepo:\n    def save(self, order):\n        return [order]\n",
+        )],
+    );
+    let upstream = names(&report, Change::Unchanged);
+    assert_eq!(
+        upstream,
+        vec!["app/service.py:nightly", "app/service.py:run"],
+        "a bare save() elsewhere is another function"
+    );
+    assert!(report.calls.iter().all(|c| !c.inferred));
+}

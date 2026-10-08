@@ -14,6 +14,12 @@ follow [Semantic Versioning](https://semver.org/).
 - Python: functions, methods and lambdas; calls through absolute and
   relative imports and `__init__.py` re-exports; routes from decorators
   (`@app.get`, `@router.post`, `@bp.route`).
+- Go calls through an interface reach every implementation in the
+  repository (up to 8), as `inferred` calls: `"inferred": true` in the
+  plan, a hollow arrowhead `▷` in the graph, a dotted curve on the web
+  page.
+- Python calls on instances whose class the code states (annotations,
+  `x = Repo(…)`, `self.x = …`) reach the class's method.
 - Presets `go` (`defer-in-loop`) and `python` (`python-await-in-loop`),
   on by default; `ast` rules take `language = "go"` or `"python"`.
 

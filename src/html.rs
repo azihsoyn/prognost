@@ -34,6 +34,8 @@ pub struct ModelEdge {
     pub from: String,
     pub to: String,
     pub status: &'static str,
+    /// Guessed through a Go interface: drawn dotted.
+    pub inferred: bool,
 }
 
 pub struct Model {
@@ -92,10 +94,11 @@ impl Model {
             .iter()
             .map(|e| {
                 format!(
-                    "{{\"from\":{},\"to\":{},\"status\":{}}}",
+                    "{{\"from\":{},\"to\":{},\"status\":{}{}}}",
                     json_str(&e.from),
                     json_str(&e.to),
-                    json_str(e.status)
+                    json_str(e.status),
+                    if e.inferred { ",\"inferred\":true" } else { "" }
                 )
             })
             .collect();
@@ -208,6 +211,7 @@ h1 { margin:0; font-size:18px; font-weight:600; }
 #hint { position:absolute; left:14px; bottom:12px; font-family:var(--mono); font-size:11px; color:var(--muted); background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:5px 9px; }
 svg path.e { fill:none; stroke:var(--edge); stroke-width:1.4; }
 svg path.e.added { stroke:var(--added); } svg path.e.removed { stroke:var(--removed); stroke-dasharray:5 4; }
+svg path.e.inferred { stroke-dasharray:1.5 4; stroke-linecap:round; }
 svg path.e.dim { opacity:.18; }
 svg path.e.hi { stroke:var(--hi); stroke-width:2.6; } svg path.e.hi2 { stroke:var(--hi-2); stroke-width:2.2; }
 svg marker path { fill:var(--edge); }
@@ -336,7 +340,9 @@ function buildView() {
   for (const e of M.edges) {
     const a = of[e.from], b = of[e.to]; if (!a || !b || a === b) continue;
     const ex = edges.find(x => x.from === a && x.to === b);
-    if (ex) { if (rank(e.status) > rank(ex.status)) ex.status = e.status; } else edges.push({ from: a, to: b, status: e.status });
+    // Folded edges are a guess only when every call in them is.
+    if (ex) { if (rank(e.status) > rank(ex.status)) ex.status = e.status; ex.inferred = ex.inferred && !!e.inferred; }
+    else edges.push({ from: a, to: b, status: e.status, inferred: !!e.inferred });
   }
   view = { nodes, edges, of, members };
 }
@@ -466,7 +472,7 @@ function drawEdges() {
     const d = x2 >= x1 ? `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`
                        : `M${x1},${y1} C${x1 + 60},${y1} ${x2 - 60},${y2} ${x2},${y2}`;
     const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    p.setAttribute('d', d); p.setAttribute('class', 'e ' + e.status); p.dataset.from = e.from; p.dataset.to = e.to;
+    p.setAttribute('d', d); p.setAttribute('class', 'e ' + e.status + (e.inferred ? ' inferred' : '')); p.dataset.from = e.from; p.dataset.to = e.to;
     p.setAttribute('marker-end', e.status === 'added' ? 'url(#m-added)' : e.status === 'removed' ? 'url(#m-removed)' : 'url(#m)');
     eg.appendChild(p);
   }

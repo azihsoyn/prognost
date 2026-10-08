@@ -107,6 +107,11 @@ pub struct Call {
     /// not be placed, or for a call the diff removed.
     pub line: Option<u32>,
     pub change: CallChange,
+    /// The call's target is a guess: a Go method called through an
+    /// interface, which may land on any of its implementations. Absent
+    /// when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inferred: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

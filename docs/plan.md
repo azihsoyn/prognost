@@ -53,7 +53,7 @@ two layers:
   "functions": [{ "id", "name", "path", "range": { "start", "end" }, "side": "head|base",
                   "change": "added|changed|removed|unchanged", "package", "exported",
                   "route"?, "entry"?: "route|component|module|export|function|unexplored" }],
-  "calls":     [{ "caller", "callee", "line", "change": "added|removed|unchanged" }],
+  "calls":     [{ "caller", "callee", "line", "change": "added|removed|unchanged", "inferred"? }],
   // derived from the facts
   "summary": {
     "changed": { "added", "changed", "removed", "files_without_function_changes" },
@@ -69,6 +69,10 @@ two layers:
 recomputed from `functions` and `calls`: a function's reach is what
 reaches it over the calls the diff keeps (`change` other than
 `removed`), not counting other changed functions.
+
+A call with `"inferred": true` is a guess: a Go method called through an
+interface, which may land on any type that implements it. Reach counts
+it; a reader who wants only certain calls drops those.
 
 ## assess
 

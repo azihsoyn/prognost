@@ -163,6 +163,79 @@ fn route_info(node: Node, src: &[u8]) -> Option<String> {
     path.starts_with('/').then(|| format!("{verb} {path}"))
 }
 
+/// The interfaces a file declares and the methods its types have — what
+/// it takes to guess which methods a call through an interface may
+/// land on.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Types {
+    /// (interface, the methods it names). Embedded interfaces are not
+    /// followed.
+    pub interfaces: Vec<(String, Vec<String>)>,
+    /// (receiver type, method).
+    pub methods: Vec<(String, String)>,
+}
+
+pub fn types(source: &str) -> Types {
+    let mut out = Types::default();
+    let Ok(tree) = parse(source) else {
+        return out;
+    };
+    let src = source.as_bytes();
+    let root = tree.root_node();
+    for top in root.children(&mut root.walk()) {
+        match top.kind() {
+            "type_declaration" => {
+                for spec in top.children(&mut top.walk()) {
+                    if spec.kind() != "type_spec" {
+                        continue;
+                    }
+                    let (Some(name), Some(ty)) = (
+                        spec.child_by_field_name("name"),
+                        spec.child_by_field_name("type"),
+                    ) else {
+                        continue;
+                    };
+                    if ty.kind() != "interface_type" {
+                        continue;
+                    }
+                    let methods: Vec<String> = ty
+                        .children(&mut ty.walk())
+                        .filter(|m| m.kind() == "method_elem")
+                        .filter_map(|m| m.child_by_field_name("name"))
+                        .map(|n| text(n, src))
+                        .collect();
+                    if !methods.is_empty() {
+                        out.interfaces.push((text(name, src), methods));
+                    }
+                }
+            }
+            "method_declaration" => {
+                let recv = top
+                    .child_by_field_name("receiver")
+                    .and_then(|r| r.named_child(0))
+                    .and_then(|p| p.child_by_field_name("type"))
+                    .and_then(|t| receiver_type(t, src));
+                if let (Some(recv), Some(name)) = (recv, top.child_by_field_name("name")) {
+                    out.methods.push((recv, text(name, src)));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `*Store`, `Store`, `*Box[T]` → the type's name.
+fn receiver_type(node: Node, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type_identifier" => Some(text(node, src)),
+        "pointer_type" => receiver_type(node.named_child(0)?, src),
+        "generic_type" => receiver_type(node.child_by_field_name("type")?, src),
+        "parenthesized_type" => receiver_type(node.named_child(0)?, src),
+        _ => None,
+    }
+}
+
 /// The import paths a file names.
 pub fn import_specs(source: &str) -> Vec<String> {
     imports(source).into_iter().map(|(_, path)| path).collect()
@@ -336,6 +409,21 @@ func helper() error { return nil }
         assert_eq!(fns[1].calls, vec!["s.ping"]);
         assert_eq!(fns[2].route.as_deref(), Some("GET /orders"));
         assert_eq!(fns[3].calls, vec!["helper"]);
+    }
+
+    #[test]
+    fn interfaces_and_method_sets() {
+        let t = types(
+            "package p\ntype Store interface {\n\tio.Closer\n\tSave(o Order) error\n}\ntype N int\nfunc (s *PgStore) Save(o Order) error { return nil }\nfunc (b Box[T]) Get() {}\n",
+        );
+        assert_eq!(t.interfaces, vec![("Store".into(), vec!["Save".into()])]);
+        assert_eq!(
+            t.methods,
+            vec![
+                ("PgStore".into(), "Save".into()),
+                ("Box".into(), "Get".into())
+            ]
+        );
     }
 
     #[test]

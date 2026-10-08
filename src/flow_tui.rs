@@ -162,6 +162,11 @@ pub struct App {
     /// revisions, tests left out: asked once per *function* of that file
     /// on an upstream walk, and the same for all of them.
     importers_cache: HashMap<PathBuf, Vec<String>>,
+    go_index: Option<GoIndex>,
+    /// (calling file, function id) reached only through an interface.
+    inferred_calls: HashSet<(PathBuf, String)>,
+    /// Edges (caller, callee) that are such calls: drawn as guesses.
+    inferred_edges: HashSet<(String, String)>,
 
     nodes: Vec<GNode>,
     /// Every call relation on the canvas, caller → callee, with the
@@ -341,6 +346,9 @@ impl App {
             granularity: Granularity::Function,
             function_files,
             importers_cache: HashMap::new(),
+            go_index: None,
+            inferred_calls: HashSet::new(),
+            inferred_edges: HashSet::new(),
             nodes: vec![GNode {
                 id: origin_id.clone(),
                 display: origin_display,
@@ -419,6 +427,9 @@ impl App {
             granularity: Granularity::Function,
             function_files: HashMap::new(),
             importers_cache: HashMap::new(),
+            go_index: None,
+            inferred_calls: HashSet::new(),
+            inferred_edges: HashSet::new(),
             nodes: Vec::new(),
             edges: HashMap::new(),
             expanded_from: HashMap::new(),
@@ -643,11 +654,12 @@ impl App {
     ///
     /// In Go every top-level function and method is reachable from the
     /// package's other files; in Python every top-level `def` can be
-    /// imported, underscore or not.
+    /// imported, underscore or not, and a class's methods are called
+    /// wherever an instance of it goes.
     fn is_importable(&self, file: &std::path::Path, label: &str) -> bool {
         let visible: fn(&TsFunction) -> bool = match Lang::of(file) {
             Some(Lang::Go) => |f| f.parent.is_none(),
-            Some(Lang::Python) => |f| f.parent.is_none() && !f.method,
+            Some(Lang::Python) => |f| f.parent.is_none(),
             _ => |f| f.parent.is_none() && f.exported,
         };
         self.function_files.get(file).is_some_and(|entry| {
@@ -988,14 +1000,38 @@ impl App {
         }
         // A Go package's files call each other's functions unqualified,
         // with no import between them.
+        // And a method may be called through an interface it
+        // satisfies: from the interface's package, and whatever imports
+        // that.
         if Lang::of(file) == Some(Lang::Go) {
-            let dir = file.parent().unwrap_or(std::path::Path::new(""));
-            for rev in [&self.base_rev, &self.head_rev] {
-                importer_paths.extend(
-                    crate::golang::package_files(dir, &self.root, rev)
-                        .into_iter()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                );
+            let mut dirs = vec![
+                file.parent()
+                    .unwrap_or(std::path::Path::new(""))
+                    .to_path_buf(),
+            ];
+            dirs.extend(self.go_interface_dirs(file));
+            dirs.dedup();
+            for (i, dir) in dirs.iter().enumerate() {
+                for (rev, ws) in [
+                    (&self.base_rev, &self.base_ws),
+                    (&self.head_rev, &self.head_ws),
+                ] {
+                    let files = crate::golang::package_files(dir, &self.root, rev);
+                    if i > 0
+                        && let Some(first) = files.first()
+                    {
+                        let g = crate::graph::reach(
+                            &self.root,
+                            rev,
+                            first,
+                            ImportDirection::Callers,
+                            ws,
+                        );
+                        importer_paths.extend(g.nodes.into_iter().map(|n| n.path));
+                    }
+                    importer_paths
+                        .extend(files.into_iter().map(|p| p.to_string_lossy().into_owned()));
+                }
             }
         }
         importer_paths.remove(&file.to_string_lossy().into_owned());
@@ -1027,14 +1063,17 @@ impl App {
             Status::Unchanged,
             false,
         );
-        match self.resolve_fragment(frag) {
-            Some((id, _, _, true)) => id == make_fn_id(target, label),
-            Some((id, _, _, false)) => match self.call_file.get(&id) {
-                Some((f, _)) => f == target,
-                None => split_pkg_id(&id).is_some_and(|(pkg, _)| pkg == self.file_label(target)),
-            },
-            None => false,
-        }
+        self.resolve_fragments(frag)
+            .into_iter()
+            .any(|(id, _, _, drillable)| match drillable {
+                true => id == make_fn_id(target, label),
+                false => match self.call_file.get(&id) {
+                    Some((f, _)) => f == target,
+                    None => {
+                        split_pkg_id(&id).is_some_and(|(pkg, _)| pkg == self.file_label(target))
+                    }
+                },
+            })
     }
 
     fn cross_file_callers(&mut self, file: &std::path::Path, label: &str) -> Vec<Fragment> {
@@ -1050,6 +1089,13 @@ impl App {
         let mut module_head: Vec<(PathBuf, u32)> = Vec::new();
         let mut module_base: Vec<(PathBuf, u32)> = Vec::new();
         let mut out: Vec<Fragment> = Vec::new();
+        // A method is only ever called on something (`repo.save`): a
+        // bare `save()` elsewhere is another function.
+        let method = self
+            .function_files
+            .get(file)
+            .and_then(|e| find_function(e, label))
+            .is_some_and(|(_, f)| f.method);
         for p in &importer_paths {
             let importer_path = PathBuf::from(p);
             let Some(entry) = self.function_files.get(&importer_path) else {
@@ -1069,7 +1115,10 @@ impl App {
                 .collect();
             dotted.sort();
             dotted.dedup();
-            let mut accepted: HashSet<String> = HashSet::from([label.to_string()]);
+            let mut accepted: HashSet<String> = HashSet::new();
+            if !method {
+                accepted.insert(label.to_string());
+            }
             for c in dotted {
                 if self.call_resolves_to(&importer_path, &c, file, label) {
                     accepted.insert(c);
@@ -1119,11 +1168,17 @@ impl App {
             // they reach the change as that module's own code.
             let call = regex::Regex::new(&format!(r"\b{}\s*\(", regex::escape(label)))
                 .expect("valid regex");
+            // Go runs no code at a file's top level worth the name (and
+            // an interface's method list would read as calls).
+            let module_level = Lang::of(&importer_path) != Some(Lang::Go) && !method;
             for (rev, fns, raw) in [
                 (&self.head_rev, &entry.head_fns, &mut module_head),
                 (&self.base_rev, &entry.base_fns, &mut module_base),
             ] {
-                let Some(text) = rev.read(&self.root, &importer_path) else {
+                let Some(text) = rev
+                    .read(&self.root, &importer_path)
+                    .filter(|_| module_level)
+                else {
                     continue;
                 };
                 for (i, l) in text.lines().enumerate() {
@@ -1428,53 +1483,62 @@ impl App {
         let mut hidden = 0;
         let mut local = 0;
         for (call_index, frag) in fragment.into_iter().enumerate() {
-            let Some((new_id, label, call_status, drillable)) = self.resolve_fragment(frag) else {
+            let resolved = self.resolve_fragments(frag);
+            if resolved.is_empty() {
                 local += 1;
                 continue;
-            };
-            if new_id == id {
-                continue;
             }
-            let edge = match dir {
-                Dir::Callers => (new_id.clone(), id.clone()),
-                Dir::Callees => (id.clone(), new_id.clone()),
-            };
-            // The line carries the call's status (a call added or
-            // removed); the node carries its own body's. A function that
-            // didn't change is grey even when a brand-new call reaches
-            // it — the green line is what says "newly reached".
-            self.edges.entry(edge).or_insert(call_status);
-            let status = self.own_status(&new_id, &label, drillable, call_status);
-            if let Some(existing) = self.nodes.iter_mut().find(|e| e.id == new_id) {
-                // Reached again from somewhere else: the new edge is the
-                // news. An unresolved call shared by several callers
-                // counts as changed if *any* of them added or removed it.
-                if !existing.drillable
-                    && existing.status == Status::Unchanged
-                    && status != Status::Unchanged
+            for (new_id, label, call_status, drillable) in resolved {
+                if new_id == id {
+                    continue;
+                }
+                let edge = match dir {
+                    Dir::Callers => (new_id.clone(), id.clone()),
+                    Dir::Callees => (id.clone(), new_id.clone()),
+                };
+                // The line carries the call's status (a call added or
+                // removed); the node carries its own body's. A function that
+                // didn't change is grey even when a brand-new call reaches
+                // it — the green line is what says "newly reached".
+                if self
+                    .inferred_calls
+                    .contains(&(split_fn_id(&edge.0).0, edge.1.clone()))
                 {
-                    existing.status = status;
+                    self.inferred_edges.insert(edge.clone());
                 }
-                linked += 1;
-                continue;
-            }
-            let display = self.node_display(&new_id, &label, drillable);
-            self.nodes.push(GNode {
-                id: new_id.clone(),
-                display,
-                status,
-                drillable,
-            });
-            if dir == Dir::Callees {
-                self.call_order.entry(new_id.clone()).or_insert(call_index);
-                if status == Status::Unchanged && !self.show_unchanged {
-                    hidden += 1;
+                self.edges.entry(edge).or_insert(call_status);
+                let status = self.own_status(&new_id, &label, drillable, call_status);
+                if let Some(existing) = self.nodes.iter_mut().find(|e| e.id == new_id) {
+                    // Reached again from somewhere else: the new edge is the
+                    // news. An unresolved call shared by several callers
+                    // counts as changed if *any* of them added or removed it.
+                    if !existing.drillable
+                        && existing.status == Status::Unchanged
+                        && status != Status::Unchanged
+                    {
+                        existing.status = status;
+                    }
+                    linked += 1;
+                    continue;
                 }
+                let display = self.node_display(&new_id, &label, drillable);
+                self.nodes.push(GNode {
+                    id: new_id.clone(),
+                    display,
+                    status,
+                    drillable,
+                });
+                if dir == Dir::Callees {
+                    self.call_order.entry(new_id.clone()).or_insert(call_index);
+                    if status == Status::Unchanged && !self.show_unchanged {
+                        hidden += 1;
+                    }
+                }
+                self.expanded_from
+                    .entry(new_id)
+                    .or_insert_with(|| (id.clone(), dir));
+                added += 1;
             }
-            self.expanded_from
-                .entry(new_id)
-                .or_insert_with(|| (id.clone(), dir));
-            added += 1;
         }
         let mut parts = vec![format!("+{added} node(s)")];
         if linked > 0 {
@@ -1635,6 +1699,25 @@ impl App {
                     reached = Some(f);
                 }
             }
+            // `Repo.save` (or `mod.Repo.save`) with the class imported:
+            // the method, in the file that defines the class.
+            let mut parts: Vec<&str> = match &import.binding {
+                crate::bindings::Binding::Named(n) => vec![n.as_str()],
+                _ => Vec::new(),
+            };
+            parts.extend(&segments[1..segments.len() - 1]);
+            if reached.is_none()
+                && let Some((class, path)) = parts.split_last()
+            {
+                let module = path
+                    .iter()
+                    .fold(import.specifier.clone(), |m, p| crate::python::join(&m, p));
+                if let Some(f) = self.resolve_spec(&module, &file)
+                    && let Some(d) = self.python_method(&f, class, last)
+                {
+                    return Some((make_fn_id(&d, last), last.to_string(), status, true));
+                }
+            }
         }
         let target: Option<(PathBuf, String)> = match (&import.binding, entry_file) {
             (crate::bindings::Binding::Named(imported), Some(f))
@@ -1707,6 +1790,133 @@ impl App {
         }
         self.call_text.entry(new_id.clone()).or_insert(label);
         Some((new_id, shown, status, false))
+    }
+
+    /// [`resolve_fragment`], and for a Go method call nothing concrete
+    /// answers, every method it may land on through an interface: the
+    /// implementations of the interfaces the calling file can see that
+    /// declare the method. Those calls are inferred, and recorded so.
+    fn resolve_fragments(&mut self, frag: Fragment) -> Vec<Fragment> {
+        let (id, label, status, drillable) = frag.clone();
+        if let Some(hit) = self.resolve_fragment(frag) {
+            return vec![hit];
+        }
+        let (file, _) = split_fn_id(&id);
+        if drillable || label.contains('(') || Lang::of(&file) != Some(Lang::Go) {
+            return Vec::new();
+        }
+        let segments: Vec<&str> = label.split('.').collect();
+        let (Some(root), Some(last)) = (segments.first(), segments.last()) else {
+            return Vec::new();
+        };
+        if segments.len() < 2 || self.bindings_of(&file).contains_key(*root) {
+            return Vec::new();
+        }
+        let last = last.to_string();
+        self.go_interface_targets(&file, &last)
+            .into_iter()
+            .map(|f| {
+                let target = make_fn_id(&f, &last);
+                self.inferred_calls.insert((file.clone(), target.clone()));
+                (target, last.clone(), status, true)
+            })
+            .collect()
+    }
+
+    /// Interfaces and method sets of every Go file in either revision.
+    fn go_index(&mut self) -> &GoIndex {
+        if self.go_index.is_none() {
+            let mut index = GoIndex::default();
+            for rev in [&self.head_rev, &self.base_rev] {
+                for f in rev.list_files(&self.root) {
+                    if f.extension().is_none_or(|e| e != "go") || is_test_file(&f) {
+                        continue;
+                    }
+                    let Some(src) = rev.read(&self.root, &f) else {
+                        continue;
+                    };
+                    let dir = f.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+                    let t = crate::golang::types(&src);
+                    for (name, methods) in t.interfaces {
+                        let key = (dir.clone(), name);
+                        if !index.interfaces.iter().any(|(k, _)| *k == key) {
+                            index.interfaces.push((key, methods));
+                        }
+                    }
+                    for (ty, m) in t.methods {
+                        index
+                            .methods
+                            .entry((dir.clone(), ty))
+                            .or_default()
+                            .entry(m)
+                            .or_insert_with(|| f.clone());
+                    }
+                }
+            }
+            self.go_index = Some(index);
+        }
+        self.go_index.as_ref().unwrap()
+    }
+
+    /// The files of the methods named `method` that a call from `file`
+    /// may reach through an interface declared in its own package or
+    /// one it imports. None when more than [`MAX_IMPLEMENTATIONS`]
+    /// types qualify: a method that common says nothing.
+    fn go_interface_targets(&mut self, file: &std::path::Path, method: &str) -> Vec<PathBuf> {
+        let mut visible: Vec<PathBuf> = vec![
+            file.parent()
+                .unwrap_or(std::path::Path::new(""))
+                .to_path_buf(),
+        ];
+        let specs: Vec<String> = self
+            .bindings_of(file)
+            .values()
+            .map(|i| i.specifier.clone())
+            .collect();
+        for spec in specs {
+            if let Some(dir) = crate::golang::resolve(&spec, &self.head_ws)
+                .or_else(|| crate::golang::resolve(&spec, &self.base_ws))
+            {
+                visible.push(dir);
+            }
+        }
+        let index = self.go_index();
+        let mut out: Vec<PathBuf> = Vec::new();
+        for ((dir, _), methods) in &index.interfaces {
+            if !visible.contains(dir) || !methods.iter().any(|m| m == method) {
+                continue;
+            }
+            for set in index.methods.values() {
+                if methods.iter().all(|m| set.contains_key(m)) {
+                    out.push(set[method].clone());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        if out.len() > MAX_IMPLEMENTATIONS {
+            return Vec::new();
+        }
+        out
+    }
+
+    /// The directories of the interfaces some type in `file`
+    /// implements: where calls that may land on its methods are made.
+    fn go_interface_dirs(&mut self, file: &std::path::Path) -> Vec<PathBuf> {
+        let index = self.go_index();
+        let mut out: Vec<PathBuf> = index
+            .interfaces
+            .iter()
+            .filter(|(_, methods)| {
+                index.methods.values().any(|set| {
+                    methods.iter().all(|m| set.contains_key(m)) && set.values().any(|f| f == file)
+                })
+            })
+            .map(|((dir, _), _)| dir.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// [`resolve_fragment`] for a call made in a Go file. `pkg.F` is
@@ -2111,6 +2321,47 @@ impl App {
 
     /// The file among `file`'s imports that exports a top-level `label`.
     fn resolve_import(&mut self, file: &std::path::Path, label: &str) -> Option<PathBuf> {
+        let deps = self.deps_of(file);
+        deps.into_iter().find(|d| {
+            self.exports_textually(d, label)
+                && self.ensure_function_file(d)
+                && self.is_importable(d, label)
+        })
+    }
+
+    /// The file defining Python class `class` — `file` itself, or one it
+    /// imports (a package's `__init__.py` re-exporting it) — when that
+    /// class has a method `method`.
+    fn python_method(
+        &mut self,
+        file: &std::path::Path,
+        class: &str,
+        method: &str,
+    ) -> Option<PathBuf> {
+        let pattern =
+            regex::Regex::new(&format!(r"(?m)^class\s+{}\b", regex::escape(class))).ok()?;
+        let defines = |this: &Self, f: &std::path::Path| {
+            [&this.head_rev, &this.base_rev]
+                .into_iter()
+                .filter_map(|rev| rev.read(&this.root, f))
+                .any(|src| pattern.is_match(&src))
+        };
+        let mut candidates = vec![file.to_path_buf()];
+        if !defines(self, file) {
+            candidates = self.deps_of(file);
+        }
+        let found = candidates.into_iter().find(|f| defines(self, f))?;
+        let has = self.ensure_function_file(&found)
+            && self.function_files[&found]
+                .head_fns
+                .iter()
+                .chain(&self.function_files[&found].base_fns)
+                .any(|f| f.method && f.name.as_deref() == Some(method));
+        has.then_some(found)
+    }
+
+    /// The files `file` imports, in either revision; tests excluded.
+    fn deps_of(&mut self, file: &std::path::Path) -> Vec<PathBuf> {
         if !self.deps_cache.contains_key(file) {
             let mut deps: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for (rev, ws) in [
@@ -2128,12 +2379,7 @@ impl App {
                 .collect();
             self.deps_cache.insert(file.to_path_buf(), deps);
         }
-        let deps = self.deps_cache[file].clone();
-        deps.into_iter().find(|d| {
-            self.exports_textually(d, label)
-                && self.ensure_function_file(d)
-                && self.is_importable(d, label)
-        })
+        self.deps_cache[file].clone()
     }
 
     fn collapse(&mut self, id: &str) {
@@ -5164,6 +5410,7 @@ impl App {
                     Status::Removed => CallChange::Removed,
                     _ => CallChange::Unchanged,
                 },
+                inferred: self.inferred_edges.contains(&(a.clone(), b.clone())),
             })
             .collect();
         calls.sort_by(|x, y| (&x.caller, &x.callee).cmp(&(&y.caller, &y.callee)));
@@ -5538,6 +5785,7 @@ impl App {
                 from: a.clone(),
                 to: b.clone(),
                 status: status_name(*s),
+                inferred: self.inferred_edges.contains(&(a.clone(), b.clone())),
             })
             .collect();
         edges.sort_by(|x, y| (&x.from, &x.to).cmp(&(&y.from, &y.to)));
@@ -5654,7 +5902,16 @@ fn draw_world(app: &App, geo: &Geometry) -> Buffer {
             } else {
                 edge_color(leg.status).unwrap_or(Color::DarkGray)
             };
-            world.set_string(x as u16, y as u16, "▶", Style::default().fg(color));
+            // A hollow head: a call guessed through a Go interface.
+            let head = if app
+                .inferred_edges
+                .contains(&(leg.from.clone(), leg.to.clone()))
+            {
+                "▷"
+            } else {
+                "▶"
+            };
+            world.set_string(x as u16, y as u16, head, Style::default().fg(color));
         }
     }
 
@@ -6115,6 +6372,19 @@ fn base_counterpart(entry: &FunctionFileEntry, head_idx: usize) -> Option<usize>
         _ => None,
     })
 }
+
+/// Go interfaces and method sets, by package directory.
+#[derive(Default)]
+struct GoIndex {
+    /// ((directory, interface), the methods it declares).
+    interfaces: Vec<((PathBuf, String), Vec<String>)>,
+    /// (directory, type) → method → the file it is declared in.
+    methods: HashMap<(PathBuf, String), HashMap<String, PathBuf>>,
+}
+
+/// More types than this implementing one interface, and a call through
+/// it is not followed: it could be anything.
+const MAX_IMPLEMENTATIONS: usize = 8;
 
 /// Spec/test files are excluded from a whole-diff graph: a change is
 /// asserted there, but it doesn't flow through them.
