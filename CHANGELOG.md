@@ -30,6 +30,9 @@ follow [Semantic Versioning](https://semver.org/).
 - Python calls on instances whose class the code states (annotations,
   `x = Repo(…)`, `self.x = …`, `self.save()`) reach the class's method;
   `Repo(…)` reaches `Repo.__init__`.
+- `plan --json`: each function's `params` (name, type, default, as
+  written) and each call's `args` (the arguments it passes, as written),
+  so a parameter's value can be followed back through its callers.
 - `[[resolver]]` in `prognost.toml`: an external command (Go's
   `callgraph`, or anything printing call site → function positions) that
   answers the calls prognost cannot resolve by reading code. Run once per

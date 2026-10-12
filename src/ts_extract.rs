@@ -42,6 +42,78 @@ pub struct TsFunction {
     /// nothing about what a Hono handler actually is, while the method
     /// and path are right there in the same call.
     pub route: Option<String>,
+    /// The parameters, as declared.
+    pub params: Vec<Param>,
+    /// The arguments of each entry of `calls`, parallel to it: each
+    /// top-level argument's source text, whitespace collapsed.
+    pub call_args: Vec<Vec<String>>,
+}
+
+/// One declared parameter: its name (a destructuring pattern as
+/// written), its type annotation and its default value, when there are
+/// any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    pub name: String,
+    pub r#type: Option<String>,
+    pub default: Option<String>,
+    /// Declared optional (`x?: T`): may be left out without a default.
+    pub optional: bool,
+}
+
+/// A node's source text with whitespace runs collapsed to one space.
+pub(crate) fn squeezed(node: Node, src: &[u8]) -> String {
+    node.utf8_text(src)
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The top-level arguments of a call's argument node, as text; one
+/// argument when the node is something else (a tagged template, a bare
+/// generator expression).
+pub(crate) fn argument_texts(args: Option<Node>, src: &[u8]) -> Vec<String> {
+    let Some(args) = args else {
+        return Vec::new();
+    };
+    if !matches!(args.kind(), "arguments" | "argument_list") {
+        return vec![squeezed(args, src)];
+    }
+    args.named_children(&mut args.walk())
+        .filter(|a| a.kind() != "comment")
+        .map(|a| squeezed(a, src))
+        .collect()
+}
+
+/// TypeScript parameters: `(a: T, b = 1, c?: U, { d }: Opts, ...rest)`,
+/// or an arrow function's single bare one.
+fn ts_params(func: Node, src: &[u8]) -> Vec<Param> {
+    if let Some(single) = func.child_by_field_name("parameter") {
+        return vec![Param {
+            name: squeezed(single, src),
+            r#type: None,
+            default: None,
+            optional: false,
+        }];
+    }
+    let Some(list) = func.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+    list.named_children(&mut list.walk())
+        .filter(|p| matches!(p.kind(), "required_parameter" | "optional_parameter"))
+        .map(|p| Param {
+            name: p
+                .child_by_field_name("pattern")
+                .map(|n| squeezed(n, src))
+                .unwrap_or_default(),
+            r#type: p
+                .child_by_field_name("type")
+                .map(|t| squeezed(t, src).trim_start_matches(':').trim().to_string()),
+            default: p.child_by_field_name("value").map(|v| squeezed(v, src)),
+            optional: p.kind() == "optional_parameter",
+        })
+        .collect()
 }
 
 const FUNCTION_KINDS: &[&str] = &[
@@ -235,6 +307,8 @@ fn walk(node: Node, src: &[u8], enclosing: Option<usize>, out: &mut Vec<TsFuncti
             calls: Vec::new(),
             call_lines: Vec::new(),
             route: route_info(node, src),
+            params: ts_params(node, src),
+            call_args: Vec::new(),
         });
         for child in node.children(&mut node.walk()) {
             walk(child, src, Some(id), out);
@@ -250,6 +324,9 @@ fn walk(node: Node, src: &[u8], enclosing: Option<usize>, out: &mut Vec<TsFuncti
         out[enclosing]
             .call_lines
             .push(node.start_position().row as u32 + 1);
+        out[enclosing]
+            .call_args
+            .push(argument_texts(node.child_by_field_name("arguments"), src));
     }
 
     for child in node.children(&mut node.walk()) {
@@ -500,6 +577,44 @@ export const outer = async () => {
         let a = extract("const f = () => { g(1); };", false).unwrap();
         let b = extract("const h = () => {\n  g(1);\n};", false).unwrap();
         assert_eq!(a[0].body_hash, b[0].body_hash);
+    }
+
+    #[test]
+    fn parameters_and_call_arguments() {
+        let fns = extract(
+            "export function resetPool(pool: Pool, timeoutMs = 1000, opts?: { force: boolean }, ...rest: string[]) {\n  drain(pool, f(a, b), { x: 1,\n    y: [2, 3] });\n}\nconst g = x => h();\n",
+            false,
+        )
+        .unwrap();
+        let p = |n: &str, t: Option<&str>, d: Option<&str>, o: bool| Param {
+            name: n.into(),
+            r#type: t.map(Into::into),
+            default: d.map(Into::into),
+            optional: o,
+        };
+        assert_eq!(
+            fns[0].params,
+            vec![
+                p("pool", Some("Pool"), None, false),
+                p("timeoutMs", None, Some("1000"), false),
+                p("opts", Some("{ force: boolean }"), None, true),
+                p("...rest", Some("string[]"), None, false),
+            ]
+        );
+        assert_eq!(fns[0].calls, vec!["drain", "f"]);
+        assert_eq!(
+            fns[0].call_args,
+            vec![
+                vec![
+                    "pool".to_string(),
+                    "f(a, b)".into(),
+                    "{ x: 1, y: [2, 3] }".into()
+                ],
+                vec!["a".to_string(), "b".into()],
+            ]
+        );
+        assert_eq!(fns[1].params, vec![p("x", None, None, false)]);
+        assert_eq!(fns[1].call_args, vec![Vec::<String>::new()]);
     }
 
     #[test]

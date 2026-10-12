@@ -136,3 +136,54 @@ pub fn defines_textually(path: &Path, source: &str, name: &str) -> bool {
     };
     regex::Regex::new(&pattern).is_ok_and(|re| re.is_match(source))
 }
+
+/// The calls that start on `line` of a file, outside any function or
+/// not: (the callee as written, its top-level arguments). For code at a
+/// module's top level, which no function records.
+pub fn calls_on_line(path: &Path, source: &str, line: u32) -> Vec<(String, Vec<String>)> {
+    let (language, text): (tree_sitter::Language, std::borrow::Cow<str>) = match Lang::of(path) {
+        Some(Lang::Go) => (tree_sitter_go::LANGUAGE.into(), source.into()),
+        Some(Lang::Python) => (tree_sitter_python::LANGUAGE.into(), source.into()),
+        Some(Lang::TypeScript) => match path.extension().and_then(|e| e.to_str()) {
+            Some("tsx" | "jsx") => (tree_sitter_typescript::LANGUAGE_TSX.into(), source.into()),
+            Some("svelte") => (
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                crate::ts_extract::script_only(source, "Component").into(),
+            ),
+            _ => (
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                source.into(),
+            ),
+        },
+        None => return Vec::new(),
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(text.as_ref(), None) else {
+        return Vec::new();
+    };
+    let src = text.as_bytes();
+    let row = line.saturating_sub(1) as usize;
+    let mut out = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        if n.start_position().row > row || n.end_position().row < row {
+            continue;
+        }
+        if matches!(n.kind(), "call_expression" | "call")
+            && n.start_position().row == row
+            && let Some(f) = n.child_by_field_name("function")
+        {
+            out.push((
+                crate::ts_extract::squeezed(f, src),
+                crate::ts_extract::argument_texts(n.child_by_field_name("arguments"), src),
+            ));
+        }
+        for i in (0..n.child_count()).rev() {
+            stack.extend(n.child(i));
+        }
+    }
+    out
+}

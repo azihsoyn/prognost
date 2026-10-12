@@ -12,7 +12,7 @@ use tree_sitter::Node;
 
 use crate::bindings::{Binding, Import};
 use crate::rev::Rev;
-use crate::ts_extract::{TsFunction, code_hash};
+use crate::ts_extract::{Param, TsFunction, argument_texts, code_hash, squeezed};
 use crate::workspace::{PackageKind, Workspace};
 
 fn text(node: Node, src: &[u8]) -> String {
@@ -73,6 +73,8 @@ fn walk(node: Node, src: &[u8], enclosing: Option<usize>, out: &mut Vec<TsFuncti
             body_hash: code_hash(node, src),
             calls: Vec::new(),
             call_lines: Vec::new(),
+            params: go_params(node, src),
+            call_args: Vec::new(),
             route: if kind == "func_literal" {
                 route_info(node, src)
             } else {
@@ -97,11 +99,49 @@ fn walk(node: Node, src: &[u8], enclosing: Option<usize>, out: &mut Vec<TsFuncti
         if let Some(c) = callee.and_then(|c| callee_text(c, src)) {
             out[e].calls.push(c);
             out[e].call_lines.push(node.start_position().row as u32 + 1);
+            out[e]
+                .call_args
+                .push(argument_texts(node.child_by_field_name("arguments"), src));
         }
     }
     for child in node.children(&mut node.walk()) {
         walk(child, src, enclosing, out);
     }
+}
+
+/// `(ctx context.Context, a, b int, opts ...Option)`: one entry per
+/// name, sharing the type written after them; `_` for an unnamed one.
+fn go_params(func: Node, src: &[u8]) -> Vec<Param> {
+    let Some(list) = func.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for decl in list.named_children(&mut list.walk()) {
+        let variadic = decl.kind() == "variadic_parameter_declaration";
+        if !variadic && decl.kind() != "parameter_declaration" {
+            continue;
+        }
+        let ty = decl.child_by_field_name("type").map(|t| {
+            let t = squeezed(t, src);
+            if variadic { format!("...{t}") } else { t }
+        });
+        let names: Vec<String> = decl
+            .children_by_field_name("name", &mut decl.walk())
+            .map(|n| text(n, src))
+            .collect();
+        let names = if names.is_empty() {
+            vec!["_".to_string()]
+        } else {
+            names
+        };
+        out.extend(names.into_iter().map(|name| Param {
+            name,
+            r#type: ty.clone(),
+            default: None,
+            optional: false,
+        }));
+    }
+    out
 }
 
 /// `f`, `pkg.F`, `s.repo.Save`; a call in the chain collapses to
@@ -423,6 +463,31 @@ func helper() error { return nil }
         assert_eq!(fns[1].calls, vec!["s.ping"]);
         assert_eq!(fns[2].route.as_deref(), Some("GET /orders"));
         assert_eq!(fns[3].calls, vec!["helper"]);
+    }
+
+    #[test]
+    fn parameters_share_their_type_and_variadics_are_marked() {
+        let fns = extract(
+            "package p\nfunc (s *S) Do(ctx context.Context, a, b int, opts ...Option) {\n\tf(a, g(b))\n}\nfunc h(int) {}\n",
+        )
+        .unwrap();
+        let shown: Vec<(String, Option<String>)> = fns[0]
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), p.r#type.clone()))
+            .collect();
+        let pair = |n: &str, t: &str| (n.to_string(), Some(t.to_string()));
+        assert_eq!(
+            shown,
+            vec![
+                pair("ctx", "context.Context"),
+                pair("a", "int"),
+                pair("b", "int"),
+                pair("opts", "...Option")
+            ]
+        );
+        assert_eq!(fns[0].call_args[0], vec!["a", "g(b)"]);
+        assert_eq!(fns[1].params[0].name, "_");
     }
 
     #[test]

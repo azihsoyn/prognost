@@ -5639,6 +5639,7 @@ impl App {
                     exported: exported(id),
                     route: f.route,
                     entry: entry_of.get(id.as_str()).copied(),
+                    params: self.params_of(id),
                 }
             })
             .collect();
@@ -5663,8 +5664,14 @@ impl App {
                     _ => CallChange::Unchanged,
                 },
                 inferred: self.inferred_edges.contains(&(a.clone(), b.clone())),
+                args: None,
             })
             .collect();
+        for c in &mut calls {
+            if let Some(line) = c.line {
+                c.args = self.call_arguments(&c.caller, &c.callee, line);
+            }
+        }
         calls.sort_by(|x, y| (&x.caller, &x.callee).cmp(&(&y.caller, &y.callee)));
 
         // Facts: the files.
@@ -5916,6 +5923,77 @@ impl App {
             .filter(|(n, _)| (whole_component || within(*n)) && *n != start && !own(*n))
             .find(|(_, l)| word.is_match(l))
             .map(|(n, _)| n)
+    }
+
+    /// A function's declared parameters, HEAD first.
+    fn params_of(&self, id: &str) -> Vec<crate::plan::Param> {
+        let (file, label) = split_fn_id(id);
+        self.function_files
+            .get(&file)
+            .and_then(|e| find_function(e, label))
+            .map(|(_, f)| {
+                f.params
+                    .iter()
+                    .map(|p| crate::plan::Param {
+                        name: p.name.clone(),
+                        r#type: p.r#type.clone(),
+                        default: p.default.clone(),
+                        optional: p.optional,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The arguments of the call `caller` makes to `callee` on `line`
+    /// (HEAD): the one call on that line, or among several the one
+    /// named like the callee. `None` when it can't be told apart.
+    fn call_arguments(&self, caller: &str, callee: &str, line: u32) -> Option<Vec<String>> {
+        let (file, label) = split_fn_id(caller);
+        let mut found: Vec<(String, Vec<String>)> = Vec::new();
+        if label.starts_with("module@") {
+            // Code at the module's top level: no function recorded it.
+            let src = self.head_rev.read(&self.root, &file)?;
+            found = crate::lang::calls_on_line(&file, &src, line);
+        } else {
+            let entry = self.function_files.get(&file)?;
+            let idx = entry
+                .head_fns
+                .iter()
+                .position(|f| align::label(f) == label)?;
+            // The caller's own calls and those of the callbacks folded
+            // into it, as `inlined_calls` sees them.
+            let mut stack = vec![idx];
+            while let Some(i) = stack.pop() {
+                let f = &entry.head_fns[i];
+                for ((c, l), a) in f.calls.iter().zip(&f.call_lines).zip(&f.call_args) {
+                    if *l == line {
+                        found.push((c.clone(), a.clone()));
+                    }
+                }
+                stack.extend(entry.head_fns.iter().enumerate().filter_map(|(j, g)| {
+                    (g.parent == Some(i) && g.name.is_none() && g.route.is_none()).then_some(j)
+                }));
+            }
+        }
+        if let [(_, args)] = found.as_slice() {
+            return Some(args.clone());
+        }
+        let wanted = match split_pkg_id(callee) {
+            Some((_, call)) => call.to_string(),
+            None => split_fn_id(callee).1.to_string(),
+        };
+        let wanted = wanted.strip_suffix(".__init__").unwrap_or(&wanted);
+        let wanted = short_name(wanted);
+        let named: Vec<&Vec<String>> = found
+            .iter()
+            .filter(|(c, _)| short_name(c.split('(').next().unwrap_or(c)) == wanted)
+            .map(|(_, a)| a)
+            .collect();
+        match named.as_slice() {
+            [args] => Some((*args).clone()),
+            _ => None,
+        }
     }
 
     /// Every node with a path into the changed code, over the real
