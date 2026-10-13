@@ -534,16 +534,6 @@
     "$defs": {
       "Call": {
         "properties": {
-          "args": {
-            "description": "The arguments at `line`: each top-level argument's source,\nwhitespace collapsed, in order (`[]` for none). Absent when the\ncall could not be placed or told apart from others on its line.",
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "callee": {
             "type": "string"
           },
@@ -729,13 +719,6 @@
               "null"
             ]
           },
-          "params": {
-            "description": "Its parameters as declared; absent when it takes none. A Python\nmethod's `self`/`cls` is left out.",
-            "items": {
-              "$ref": "#/$defs/Param"
-            },
-            "type": "array"
-          },
           "path": {
             "type": "string"
           },
@@ -827,37 +810,6 @@
           "package",
           "functions",
           "files"
-        ],
-        "type": "object"
-      },
-      "Param": {
-        "description": "One declared parameter.",
-        "properties": {
-          "default": {
-            "description": "The default value's source, when there is one: what a caller\nthat leaves the argument out gets.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "name": {
-            "description": "As written: an identifier, `*args`, or a destructuring pattern\n(`{ timeoutMs, retries }`).",
-            "type": "string"
-          },
-          "optional": {
-            "description": "Declared optional without a default (`x?: T`).",
-            "type": "boolean"
-          },
-          "type": {
-            "description": "The annotation as written (`PoolOptions`, `int | None`), when\nthere is one. Not resolved.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "name"
         ],
         "type": "object"
       },

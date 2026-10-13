@@ -52,10 +52,8 @@ two layers:
   "files":     [{ "path", "change": "added|modified|deleted|renamed", "previous_path"?, "package" }],
   "functions": [{ "id", "name", "path", "range": { "start", "end" }, "side": "head|base",
                   "change": "added|changed|removed|unchanged", "package", "exported",
-                  "route"?, "entry"?: "route|component|module|export|function|unexplored",
-                  "params"?: [{ "name", "type"?, "default"?, "optional"? }] }],
-  "calls":     [{ "caller", "callee", "line", "change": "added|removed|unchanged", "inferred"?,
-                  "args"?: ["<argument source>", …] }],
+                  "route"?, "entry"?: "route|component|module|export|function|unexplored" }],
+  "calls":     [{ "caller", "callee", "line", "change": "added|removed|unchanged", "inferred"? }],
   // derived from the facts
   "summary": {
     "changed": { "added", "changed", "removed", "files_without_function_changes" },
@@ -71,16 +69,6 @@ two layers:
 recomputed from `functions` and `calls`: a function's reach is what
 reaches it over the calls the diff keeps (`change` other than
 `removed`), not counting other changed functions.
-
-A function's `params` are its parameters as declared — name, type
-annotation and default value as written, nothing resolved; a Python
-method's `self` is left out. A call's `args` are the arguments on its
-`line`, each top-level argument's source with whitespace collapsed, `[]`
-when it passes none. Together they say where a parameter's value comes
-from, one call at a time: `drain(timeoutMs)` ← `reset` passes
-`timeoutMs` ← `create` passes `options.drainTimeoutMs ?? 1000`; and a
-caller that passes nothing gets the `default`. `args` is absent when the
-call could not be placed, or another call on its line could be the one.
 
 A call with `"inferred": true` is a guess: a Go method called through an
 interface, which may land on any type that implements it. Reach counts

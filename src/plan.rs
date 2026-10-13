@@ -90,29 +90,6 @@ pub struct Function {
     /// it, or it is a route handler.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry: Option<EntryKind>,
-    /// Its parameters as declared; absent when it takes none. A Python
-    /// method's `self`/`cls` is left out.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub params: Vec<Param>,
-}
-
-/// One declared parameter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Param {
-    /// As written: an identifier, `*args`, or a destructuring pattern
-    /// (`{ timeoutMs, retries }`).
-    pub name: String,
-    /// The annotation as written (`PoolOptions`, `int | None`), when
-    /// there is one. Not resolved.
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
-    /// The default value's source, when there is one: what a caller
-    /// that leaves the argument out gets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
-    /// Declared optional without a default (`x?: T`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub optional: bool,
 }
 
 /// 1-based, inclusive.
@@ -135,11 +112,6 @@ pub struct Call {
     /// when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inferred: bool,
-    /// The arguments at `line`: each top-level argument's source,
-    /// whitespace collapsed, in order (`[]` for none). Absent when the
-    /// call could not be placed or told apart from others on its line.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

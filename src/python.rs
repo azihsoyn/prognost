@@ -14,7 +14,7 @@ use tree_sitter::Node;
 
 use crate::bindings::{Binding, Import};
 use crate::rev::Rev;
-use crate::ts_extract::{Param, TsFunction, argument_texts, code_hash, squeezed};
+use crate::ts_extract::{TsFunction, code_hash};
 use crate::workspace::{PackageKind, Workspace};
 
 fn text(node: Node, src: &[u8]) -> String {
@@ -97,8 +97,6 @@ impl Walker<'_> {
                     calls: Vec::new(),
                     call_lines: Vec::new(),
                     route: if lambda { None } else { route_info(node, src) },
-                    params: py_params(node, src, method),
-                    call_args: Vec::new(),
                 });
                 // A closure sees what its function knew.
                 let mut env = enclosing.map(|e| self.envs[e].clone()).unwrap_or_default();
@@ -150,9 +148,6 @@ impl Walker<'_> {
                     self.out[e]
                         .call_lines
                         .push(node.start_position().row as u32 + 1);
-                    self.out[e]
-                        .call_args
-                        .push(argument_texts(node.child_by_field_name("arguments"), src));
                 }
             }
             _ => {}
@@ -161,51 +156,6 @@ impl Walker<'_> {
             self.walk(child, enclosing, class.filter(|_| node.kind() == "block"));
         }
     }
-}
-
-/// `(self, a, b: int = 1, *args, key: str | None = None, **kw)`; a
-/// method's `self`/`cls` left out, since no call passes it.
-fn py_params(func: Node, src: &[u8], method: bool) -> Vec<Param> {
-    let Some(list) = func.child_by_field_name("parameters") else {
-        return Vec::new();
-    };
-    let mut out: Vec<Param> = Vec::new();
-    for p in list.named_children(&mut list.walk()) {
-        let (name, ty, default) = match p.kind() {
-            "identifier" | "list_splat_pattern" | "dictionary_splat_pattern" => {
-                (squeezed(p, src), None, None)
-            }
-            "typed_parameter" => (
-                p.named_child(0)
-                    .map(|n| squeezed(n, src))
-                    .unwrap_or_default(),
-                p.child_by_field_name("type").map(|t| squeezed(t, src)),
-                None,
-            ),
-            "default_parameter" | "typed_default_parameter" => (
-                p.child_by_field_name("name")
-                    .map(|n| squeezed(n, src))
-                    .unwrap_or_default(),
-                p.child_by_field_name("type").map(|t| squeezed(t, src)),
-                p.child_by_field_name("value").map(|v| squeezed(v, src)),
-            ),
-            _ => continue,
-        };
-        out.push(Param {
-            name,
-            r#type: ty,
-            default,
-            optional: false,
-        });
-    }
-    if method
-        && out
-            .first()
-            .is_some_and(|p| p.name == "self" || p.name == "cls")
-    {
-        out.remove(0);
-    }
-    out
 }
 
 /// `repo.save` → `Repo.save` when `repo` holds a `Repo`;
@@ -758,29 +708,6 @@ def _helper(x):
                 "Ledger"
             ]
         );
-    }
-
-    #[test]
-    fn parameters_leave_self_out_and_keep_defaults() {
-        let fns = extract(
-            "class Pool:\n    def reset(self, timeout_ms: int = 1000, *args, force=False, **kw):\n        self.drain(timeout_ms, key=1)\n",
-        )
-        .unwrap();
-        let shown: Vec<(&str, Option<&str>, Option<&str>)> = fns[0]
-            .params
-            .iter()
-            .map(|p| (p.name.as_str(), p.r#type.as_deref(), p.default.as_deref()))
-            .collect();
-        assert_eq!(
-            shown,
-            vec![
-                ("timeout_ms", Some("int"), Some("1000")),
-                ("*args", None, None),
-                ("force", None, Some("False")),
-                ("**kw", None, None),
-            ]
-        );
-        assert_eq!(fns[0].call_args[0], vec!["timeout_ms", "key=1"]);
     }
 
     #[test]
